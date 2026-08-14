@@ -1,0 +1,35 @@
+{
+  "config": {
+    "abort": {
+      "device_not_found": "The Bluetooth HID remote is no longer visible.",
+      "no_devices_found": "No connectable BLE HID-over-GATT remotes were found.",
+      "not_hogp": "The discovered device does not advertise HID-over-GATT."
+    },
+    "step": {
+      "bluetooth_confirm": {
+        "description": "Add {name} as a Bluetooth HID remote? The initial development build requires the device to be paired already."
+      },
+      "user": {
+        "data": {
+          "address": "Remote"
+        },
+        "description": "Select a visible BLE HID-over-GATT remote."
+      }
+    }
+  },
+  "entity": {
+    "event": {
+      "remote_button": {
+        "name": "Remote button",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "key_pressed": "Key pressed",
+              "key_released": "Key released"
+            }
+          }
+        }
+      }
+    }
+  }
+}

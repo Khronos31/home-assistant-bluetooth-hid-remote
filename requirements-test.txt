@@ -1,0 +1,7 @@
+bleak-retry-connector==4.6.3
+homeassistant==2026.8.1
+aiousbwatcher==1.1.2
+serialx==1.8.2
+pytest==9.0.0
+pytest-asyncio==1.4.0
+ruff==0.16.0

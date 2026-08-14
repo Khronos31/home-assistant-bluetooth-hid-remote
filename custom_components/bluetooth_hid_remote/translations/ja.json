@@ -1,0 +1,35 @@
+{
+  "config": {
+    "abort": {
+      "device_not_found": "Bluetooth HIDリモコンが見つからなくなりました。",
+      "no_devices_found": "接続可能なBLE HID-over-GATTリモコンが見つかりません。",
+      "not_hogp": "検出したデバイスはHID-over-GATTを広告していません。"
+    },
+    "step": {
+      "bluetooth_confirm": {
+        "description": "{name}をBluetooth HIDリモコンとして追加しますか？初期開発版では、デバイスが既にペアリング済みである必要があります。"
+      },
+      "user": {
+        "data": {
+          "address": "リモコン"
+        },
+        "description": "表示されているBLE HID-over-GATTリモコンを選択してください。"
+      }
+    }
+  },
+  "entity": {
+    "event": {
+      "remote_button": {
+        "name": "リモコンボタン",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "key_pressed": "キー押下",
+              "key_released": "キー解放"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable version without a v prefix (for example, 0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bluetooth-hid-remote-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Verify dispatch source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Release must be dispatched from main" >&2
+            exit 1
+          fi
+          git fetch --force origin main --tags
+          if [[ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]]; then
+            echo "origin/main changed after dispatch" >&2
+            exit 1
+          fi
+      - name: Install validation dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Synchronize release version
+        run: |
+          current="$(python scripts/version.py check)"
+          python scripts/version.py newer "$RELEASE_VERSION" "$current"
+          python scripts/version.py sync "$RELEASE_VERSION"
+          python scripts/version.py check
+          unexpected="$({ git diff --name-only; git ls-files --others --exclude-standard; } \
+            | sort -u \
+            | grep -Ev '^(README\.md|VERSION|custom_components/bluetooth_hid_remote/manifest\.json)$' \
+            || true)"
+          if [[ -n "$unexpected" ]]; then
+            echo "Version synchronization changed unexpected files:" >&2
+            echo "$unexpected" >&2
+            exit 1
+          fi
+      - name: Validate release tree
+        run: ./scripts/validate.sh
+      - name: Commit, tag, and publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="v$RELEASE_VERSION"
+          if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+            echo "$tag already exists" >&2
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md VERSION custom_components/bluetooth_hid_remote/manifest.json
+          git commit -m "Release $tag"
+          git tag -a "$tag" -m "Release $tag"
+          git fetch origin main
+          if [[ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]]; then
+            echo "origin/main changed during validation" >&2
+            exit 1
+          fi
+          gh auth setup-git --hostname github.com
+          git push --atomic origin "HEAD:refs/heads/main" "refs/tags/$tag"
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --generate-notes --title "$tag"
