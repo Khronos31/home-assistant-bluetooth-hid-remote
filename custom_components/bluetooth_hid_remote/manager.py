@@ -29,9 +29,13 @@ from .const import (
     CONF_NAME,
     EVENT_KEY_PRESSED,
     EVENT_KEY_RELEASED,
+    HID_REPORT_MAP_UUID,
+    HID_REPORT_REFERENCE_UUID,
+    HID_REPORT_TYPE_INPUT,
     HID_REPORT_UUID,
     HID_SERVICE_UUID,
 )
+from .hid import HidReportDecoder, HidUsage
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -43,6 +47,7 @@ class HidInputReport:
     report_id: int
     characteristic_handle: int
     data: bytes
+    usages: tuple[HidUsage, ...] = ()
 
     @property
     def event_type(self) -> str:
@@ -67,6 +72,13 @@ def characteristic_handle_from_path(path: str) -> int | None:
         return None
 
 
+def parse_report_reference(value: bytes) -> tuple[int, int] | None:
+    """Parse a two-byte HOGP Report Reference descriptor."""
+    if len(value) != 2:
+        return None
+    return value[0], value[1]
+
+
 class BluetoothHidRemoteManager:
     """Observe a HID connection owned by BlueZ without changing its lifetime."""
 
@@ -77,6 +89,7 @@ class BluetoothHidRemoteManager:
         self.name: str = entry.data.get(CONF_NAME, "BLE HID Remote")
         self.connected = False
         self.input_report_count = 0
+        self.report_map: bytes | None = None
         self.last_report: HidInputReport | None = None
         self.connection_failures = 0
 
@@ -86,6 +99,8 @@ class BluetoothHidRemoteManager:
         self._bluez_watcher: DeviceWatcher | None = None
         self._device_path: str | None = None
         self._report_metadata_by_path: dict[str, tuple[int, int]] = {}
+        self._report_decoder: HidReportDecoder | None = None
+        self._active_usages_by_path: dict[str, tuple[HidUsage, ...]] = {}
         self._notification_paths: set[str] = set()
         self._notification_lock = Lock()
         self._stopping = False
@@ -114,6 +129,7 @@ class BluetoothHidRemoteManager:
         self._bluez_manager = None
         self._device_path = None
         self.connected = False
+        self._active_usages_by_path.clear()
 
     async def _async_register_bluez_watcher(self) -> None:
         """Observe the direct adapter's BlueZ device object."""
@@ -181,6 +197,7 @@ class BluetoothHidRemoteManager:
         _LOGGER.debug("BlueZ HID connection %s connected=%s", self.address, connected)
         if not connected:
             self._report_metadata_by_path.clear()
+            self._active_usages_by_path.clear()
             self._notification_paths.clear()
             self.input_report_count = 0
             return
@@ -233,6 +250,8 @@ class BluetoothHidRemoteManager:
             metadata[obj[0]] = (0, characteristic.handle)
             notification_paths.append(obj[0])
 
+        await self._async_load_hid_metadata(service, metadata)
+
         self._report_metadata_by_path = metadata
         self.input_report_count = len(metadata)
         _LOGGER.debug(
@@ -241,6 +260,92 @@ class BluetoothHidRemoteManager:
             self.address,
         )
         await self._async_start_notifications(notification_paths)
+
+    async def _async_load_hid_metadata(self, service, metadata) -> None:
+        """Read static Report Map and Report References on BlueZ's connection."""
+        if self._report_decoder is None:
+            report_map = service.get_characteristic(HID_REPORT_MAP_UUID)
+            path = self._gatt_object_path(report_map)
+            if path is not None:
+                try:
+                    self.report_map = await self._async_read_bluez_value(
+                        path, defs.GATT_CHARACTERISTIC_INTERFACE
+                    )
+                    self._report_decoder = HidReportDecoder.from_report_map(
+                        self.report_map
+                    )
+                    _LOGGER.debug(
+                        "Parsed %d-byte HID Report Map for %s",
+                        len(self.report_map),
+                        self.address,
+                    )
+                except Exception:
+                    _LOGGER.debug(
+                        "Could not load HID Report Map for %s",
+                        self.address,
+                        exc_info=True,
+                    )
+
+        for characteristic in service.characteristics:
+            path = self._gatt_object_path(characteristic)
+            if path not in metadata:
+                continue
+            descriptor = next(
+                (
+                    item
+                    for item in characteristic.descriptors
+                    if item.uuid.lower() == HID_REPORT_REFERENCE_UUID
+                ),
+                None,
+            )
+            descriptor_path = self._gatt_object_path(descriptor)
+            if descriptor_path is None:
+                continue
+            try:
+                reference = parse_report_reference(
+                    await self._async_read_bluez_value(
+                        descriptor_path, defs.GATT_DESCRIPTOR_INTERFACE
+                    )
+                )
+            except Exception:
+                _LOGGER.debug(
+                    "Could not read HID Report Reference %s for %s",
+                    descriptor_path,
+                    self.address,
+                    exc_info=True,
+                )
+                continue
+            if reference is None or reference[1] != HID_REPORT_TYPE_INPUT:
+                continue
+            metadata[path] = (reference[0], characteristic.handle)
+
+    @staticmethod
+    def _gatt_object_path(gatt_object) -> str | None:
+        if gatt_object is None:
+            return None
+        obj = gatt_object.obj
+        if not isinstance(obj, tuple) or not obj or not isinstance(obj[0], str):
+            return None
+        return obj[0]
+
+    async def _async_read_bluez_value(self, path: str, interface: str) -> bytes:
+        """Read one GATT value through the existing global BlueZ D-Bus client."""
+        manager = self._bluez_manager
+        bus = manager._bus if manager is not None else None
+        if bus is None or not bus.connected or not self.connected or self._stopping:
+            raise RuntimeError("BlueZ HID connection is not available")
+        reply = await bus.call(
+            Message(
+                destination=defs.BLUEZ_SERVICE,
+                path=path,
+                interface=interface,
+                member="ReadValue",
+                signature="a{sv}",
+                body=[{}],
+            )
+        )
+        assert_gatt_reply(reply)
+        return bytes(reply.body[0])
 
     async def _async_start_notifications(self, paths: list[str]) -> None:
         """Subscribe on BlueZ's existing connection without owning its lifetime."""
@@ -343,14 +448,30 @@ class BluetoothHidRemoteManager:
                 path,
                 value.hex(),
             )
-        self._publish_report(*metadata, value)
+        report_id, characteristic_handle = metadata
+        usages: tuple[HidUsage, ...] = ()
+        if self._report_decoder is not None:
+            usages = self._report_decoder.decode(report_id, value)
+        if usages:
+            self._active_usages_by_path[path] = usages
+        elif any(value):
+            self._active_usages_by_path.pop(path, None)
+        else:
+            usages = self._active_usages_by_path.pop(path, ())
+        self._publish_report(report_id, characteristic_handle, value, usages)
 
     @callback
     def _publish_report(
-        self, report_id: int, characteristic_handle: int, data: bytes | bytearray
+        self,
+        report_id: int,
+        characteristic_handle: int,
+        data: bytes | bytearray,
+        usages: tuple[HidUsage, ...] = (),
     ) -> None:
         """Publish one input report to event entities."""
-        report = HidInputReport(report_id, characteristic_handle, bytes(data))
+        report = HidInputReport(
+            report_id, characteristic_handle, bytes(data), usages=usages
+        )
         self.last_report = report
         _LOGGER.debug(
             "HID input address=%s report_id=%d handle=%d data=%s",

@@ -77,3 +77,20 @@ unchanged unless the user explicitly removes it.
 - The tested remote returns malformed mixed-width characteristic discovery
   responses. A pre-seeded BlueZ GATT cache was required for that device; this
   device-specific OS workaround is intentionally outside the integration.
+
+## Key decoding increment
+
+- Read the HID Report Map and each Report Reference through the existing BlueZ
+  connection without changing connection ownership.
+- Parse Input items for Report ID, bit offsets, field size/count, Usage Page,
+  and array/variable usages.
+- Preserve the raw event contract when metadata is unavailable or a usage is
+  unknown.
+- Expose numeric HID Usage IDs as `key_code`, plus names for common Keyboard /
+  Keypad and Consumer usages.
+- Carry decoded usages from a nonzero press into its following zero release.
+- The AR fixture's real 149-byte Report Map decodes Report ID 1 payload
+  `580000` as Keyboard/Keypad Usage `0x58` (`Keypad Enter`). Home Assistant
+  runtime validation confirmed both `0x58` (`Keypad Enter`) and `0x51`
+  (`Keyboard Down Arrow`) on 2026-08-15, including matching key data on press
+  and release events.

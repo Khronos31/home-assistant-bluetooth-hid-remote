@@ -29,6 +29,36 @@ Current version: **0.1.0**.
 Classic Bluetooth HID and first-time pairing through ESPHome Bluetooth Proxy
 are not supported.
 
+## Event data
+
+Every press and release keeps the raw 0.1.0 attributes:
+`report_id`, `characteristic_handle`, and `data_hex`. When the remote exposes a
+readable HID Report Map and Report Reference, the integration also decodes
+standard HID usages. A single decoded key adds convenient scalar attributes:
+
+```yaml
+event_type: key_pressed
+report_id: 1
+data_hex: "580000"
+usage_page: 7
+usage_page_hex: "0x07"
+usage_page_name: Keyboard/Keypad
+key_code: 88
+key_code_hex: "0x58"
+key_name: Keypad Enter
+```
+
+`key_code` is the numeric **HID Usage ID**, not a Linux evdev code or Android
+keycode. Treat `(usage_page, key_code)` as the stable identity; the same Usage
+ID can mean something different on another page. `report_id` is the Report
+Reference ID when readable and remains `0` when that metadata is unavailable.
+
+`keys` contains the same fields as a list when a report has one or more active
+usages. A release report carries the decoded usages from its preceding press,
+so automations can match the same `key_code` for both event types. Unknown
+usage IDs remain available numerically; unreadable or unsupported descriptors
+fall back to the original raw attributes without dropping the event.
+
 ## Installation
 
 Before the first tagged release, add this repository to HACS as a custom

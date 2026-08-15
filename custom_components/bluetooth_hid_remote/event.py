@@ -23,6 +23,31 @@ DESCRIPTION = EventEntityDescription(
 )
 
 
+def event_attributes(report: HidInputReport) -> dict:
+    """Build backward-compatible raw and decoded event attributes."""
+    attributes = {
+        "report_id": report.report_id,
+        "characteristic_handle": report.characteristic_handle,
+        "data_hex": report.data.hex(),
+    }
+    keys = [
+        {
+            "usage_page": usage.usage_page,
+            "usage_page_hex": f"0x{usage.usage_page:02X}",
+            "usage_page_name": usage.usage_page_name,
+            "key_code": usage.usage_id,
+            "key_code_hex": f"0x{usage.usage_id:02X}",
+            "key_name": usage.name,
+        }
+        for usage in report.usages
+    ]
+    if keys:
+        attributes["keys"] = keys
+    if len(keys) == 1:
+        attributes.update(keys[0])
+    return attributes
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: BluetoothHidRemoteConfigEntry,
@@ -60,10 +85,6 @@ class BluetoothHidRemoteEvent(EventEntity):
         """Publish one raw report as a press or release event."""
         self._trigger_event(
             report.event_type,
-            {
-                "report_id": report.report_id,
-                "characteristic_handle": report.characteristic_handle,
-                "data_hex": report.data.hex(),
-            },
+            event_attributes(report),
         )
         self.async_write_ha_state()
