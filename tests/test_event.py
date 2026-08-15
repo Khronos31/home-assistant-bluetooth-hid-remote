@@ -1,9 +1,26 @@
 """Tests for Home Assistant event attributes."""
 
-from custom_components.bluetooth_hid_remote.event import event_attributes
+from types import SimpleNamespace
+
+from custom_components.bluetooth_hid_remote.event import (
+    BluetoothHidRemoteEvent,
+    event_attributes,
+)
 from custom_components.bluetooth_hid_remote.hid import HidUsage
 from custom_components.bluetooth_hid_remote.keymap import builtin_key_mapper
 from custom_components.bluetooth_hid_remote.manager import HidInputReport
+
+
+def test_event_unique_id_keeps_v010_address_contract() -> None:
+    """Upgrades preserve the event entity identity created by v0.1.0."""
+    entity = BluetoothHidRemoteEvent(
+        SimpleNamespace(
+            address="00:11:22:33:44:55",
+            name="Remote",
+        )
+    )
+
+    assert entity.unique_id == "001122334455_remote_button"
 
 
 def test_single_decoded_key_adds_convenience_attributes() -> None:

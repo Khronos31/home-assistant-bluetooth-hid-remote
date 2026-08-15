@@ -12,7 +12,12 @@ from homeassistant.core import HomeAssistant
 from homeassistant.util.yaml import load_yaml_dict
 
 from .android_keycodes import ANDROID_KEY_CODES
-from .const import KEY_PROFILE_ANDROID_TV, KEY_PROFILE_HID, KEYMAP_FILENAME
+from .const import (
+    KEY_PROFILE_ANDROID_TV,
+    KEY_PROFILE_GOOGLE_TV,
+    KEY_PROFILE_HID,
+    KEYMAP_FILENAME,
+)
 from .hid import HidUsage
 
 type UsageKey = tuple[int, int]
@@ -70,6 +75,13 @@ def builtin_key_mapper(profile: str) -> KeyMapper:
         return KeyMapper(profile, "hid", profile, {})
     if profile == KEY_PROFILE_ANDROID_TV:
         return KeyMapper(profile, "android", profile, {})
+    if profile == KEY_PROFILE_GOOGLE_TV:
+        return KeyMapper(
+            profile,
+            "android",
+            KEY_PROFILE_ANDROID_TV,
+            _android_overrides(_GOOGLE_TV_USAGE_NAMES),
+        )
     raise KeyMapError(f"unknown built-in key profile: {profile}")
 
 
@@ -108,7 +120,11 @@ async def async_load_custom_profiles(
 
 async def async_create_key_mapper(hass: HomeAssistant, profile: str) -> KeyMapper:
     """Create a built-in or custom mapper by profile name."""
-    if profile in (KEY_PROFILE_HID, KEY_PROFILE_ANDROID_TV):
+    if profile in (
+        KEY_PROFILE_HID,
+        KEY_PROFILE_ANDROID_TV,
+        KEY_PROFILE_GOOGLE_TV,
+    ):
         return builtin_key_mapper(profile)
     profiles = await async_load_custom_profiles(hass)
     try:
@@ -134,6 +150,7 @@ def parse_custom_profiles(data: Mapping[str, Any]) -> dict[str, CustomKeyProfile
             in (
                 KEY_PROFILE_HID,
                 KEY_PROFILE_ANDROID_TV,
+                KEY_PROFILE_GOOGLE_TV,
             )
         ):
             raise KeyMapError(f"invalid custom profile name: {name!r}")
@@ -230,6 +247,16 @@ def _android_identity(key: UsageKey) -> KeyIdentity:
     return KeyIdentity("android", ANDROID_KEY_CODES[name], name)
 
 
+def _android_overrides(
+    usage_names: Mapping[UsageKey, str],
+) -> dict[UsageKey, KeyIdentity]:
+    """Build a validated Android identity table for one public profile."""
+    return {
+        usage: KeyIdentity("android", ANDROID_KEY_CODES[name], name)
+        for usage, name in usage_names.items()
+    }
+
+
 def _normalize_android_name(name: str) -> str:
     normalized = name.strip().upper()
     return normalized.removeprefix("KEYCODE_")
@@ -293,6 +320,29 @@ _ANDROID_TV_USAGE_NAMES: dict[UsageKey, str] = {
 }
 
 
+# The genuine Google TV Remote uses these low usage IDs as its button enum
+# instead of their nominal HID Usage Tables meanings. Keep this override in a
+# device-family profile so the generic HID and Android TV profiles remain
+# standards-based. Every entry below was observed on physical hardware.
+_GOOGLE_TV_USAGE_NAMES: dict[UsageKey, str] = {
+    (0x0C, 0x0001): "DPAD_UP",
+    (0x0C, 0x0002): "DPAD_DOWN",
+    (0x0C, 0x0003): "DPAD_LEFT",
+    (0x0C, 0x0004): "DPAD_RIGHT",
+    (0x0C, 0x0005): "DPAD_CENTER",
+    (0x0C, 0x0006): "BACK",
+    (0x0C, 0x0007): "HOME",
+    (0x0C, 0x0008): "VOICE_ASSIST",
+    (0x07, 0x0001): "VOLUME_UP",
+    (0x07, 0x0002): "VOLUME_DOWN",
+    (0x0C, 0x0009): "VOLUME_MUTE",
+    (0x0C, 0x000A): "VIDEO_APP_1",
+    (0x0C, 0x000B): "VIDEO_APP_2",
+    (0x0C, 0x000C): "POWER",
+    (0x0C, 0x000D): "BOOKMARK",
+}
+
+
 # Linux's legacy HID keyboard compatibility table assigns input-event codes to
 # a handful of unassigned Keyboard/Keypad usages. Android then converts those
 # Linux codes through AOSP Generic.kl. Keep the intermediate Linux code only as
@@ -315,6 +365,7 @@ _LINUX_HID_KEYBOARD_ANDROID_COMPAT: dict[int, tuple[int, str]] = {
 
 for _android_name in (
     *_ANDROID_TV_USAGE_NAMES.values(),
+    *_GOOGLE_TV_USAGE_NAMES.values(),
     *(name for _, name in _LINUX_HID_KEYBOARD_ANDROID_COMPAT.values()),
 ):
     if _android_name not in ANDROID_KEY_CODES:

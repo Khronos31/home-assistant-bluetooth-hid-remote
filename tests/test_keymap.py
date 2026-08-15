@@ -78,6 +78,54 @@ def test_android_tv_profile_does_not_invent_unmapped_linux_compatibility() -> No
     )
 
 
+@pytest.mark.parametrize(
+    ("page", "usage_id", "code", "name"),
+    [
+        (0x0C, 0x0001, 19, "DPAD_UP"),
+        (0x0C, 0x0002, 20, "DPAD_DOWN"),
+        (0x0C, 0x0003, 21, "DPAD_LEFT"),
+        (0x0C, 0x0004, 22, "DPAD_RIGHT"),
+        (0x0C, 0x0005, 23, "DPAD_CENTER"),
+        (0x0C, 0x0006, 4, "BACK"),
+        (0x0C, 0x0007, 3, "HOME"),
+        (0x0C, 0x0008, 231, "VOICE_ASSIST"),
+        (0x07, 0x0001, 24, "VOLUME_UP"),
+        (0x07, 0x0002, 25, "VOLUME_DOWN"),
+        (0x0C, 0x0009, 164, "VOLUME_MUTE"),
+        (0x0C, 0x000A, 289, "VIDEO_APP_1"),
+        (0x0C, 0x000B, 290, "VIDEO_APP_2"),
+        (0x0C, 0x000C, 26, "POWER"),
+        (0x0C, 0x000D, 174, "BOOKMARK"),
+    ],
+)
+def test_google_tv_profile_uses_observed_genuine_remote_button_enum(
+    page: int, usage_id: int, code: int, name: str
+) -> None:
+    """The public Google profile maps all fifteen observed physical buttons."""
+    identity = builtin_key_mapper("google_tv").resolve(
+        HidUsage(page, usage_id, "Nominal HID name")
+    )
+
+    assert (identity.namespace, identity.code, identity.name) == (
+        "android",
+        code,
+        name,
+    )
+
+
+def test_google_tv_profile_falls_back_to_android_tv_mapping() -> None:
+    """Standard usages outside Google's enum retain Android TV behavior."""
+    identity = builtin_key_mapper("google_tv").resolve(
+        HidUsage(0x0C, 0x00CD, "Play/Pause")
+    )
+
+    assert (identity.namespace, identity.code, identity.name) == (
+        "android",
+        85,
+        "MEDIA_PLAY_PAUSE",
+    )
+
+
 def test_hid_profile_keeps_legacy_keyboard_usage_in_the_hid_namespace() -> None:
     """The compatibility bridge never leaks Android semantics into HID mode."""
     identity = builtin_key_mapper("hid").resolve(HidUsage(0x07, 0xF1, None))
@@ -159,6 +207,7 @@ def test_documented_example_is_a_valid_profile_file() -> None:
     [
         ({"wrong": {}}, "top-level"),
         ({"profiles": {"hid": {}}}, "invalid custom profile"),
+        ({"profiles": {"google_tv": {}}}, "invalid custom profile"),
         (
             {"profiles": {"mine": {"mappings": {"not-a-usage": "ENTER"}}}},
             "usage key",

@@ -218,8 +218,9 @@ unchanged unless the user explicitly removes it.
    attributes.
 4. A custom YAML mapping can override a canonical usage, and malformed files,
    unknown Android names, and Android name/code mismatches are rejected.
-5. Existing version-1 entries migrate to Android TV; new entries default to
-   HID. Changing the option reloads only that config entry.
+5. Existing version-1 entries migrate to Android TV / Fire TV; new entries use
+   the same remote-oriented default. HID and Google TV remain explicit options.
+   Changing the option reloads only that config entry.
 6. The local brand asset is byte-identical to the Home Assistant Bluetooth
    integration's served 256x256 PNG.
 7. Android TV resolves the AR remote's legacy Keyboard/Keypad usage
@@ -232,11 +233,14 @@ unchanged unless the user explicitly removes it.
    `0x00FF:0x00A1` through `0x00A4` to Android's service-neutral
    `VIDEO_APP_1`/`289` through `VIDEO_APP_4`/`292`; the built-in profile leaves
    these standard HID usages unknown.
+10. The public Google TV profile maps all fifteen proprietary low-numbered
+    usages observed on the genuine Google TV Remote into the Android
+    namespace, while unobserved standard usages fall back to Android TV.
 
 ## Voice remote roadmap
 
-The hardware coverage matrix contains four independent devices: genuine and
-compatible Fire TV remotes, then genuine and compatible Google TV remotes.
+The v0.2.0 hardware coverage matrix contains four independent devices: genuine
+and compatible Fire TV remotes, and genuine and compatible Google TV remotes.
 Passing one cell never implies support for another.
 
 ### Public key-profile contract
@@ -257,10 +261,11 @@ Passing one cell never implies support for another.
   The target household should not need local overrides once all four test
   remotes are covered by public profiles.
 
-### v0.2.0: Fire TV Voice Remote as an Assist microphone
+### v0.2.0: Fire TV and Google TV remotes as Assist microphones
 
-- The release target is a genuine Fire TV Voice Remote. The inexpensive `AR`
-  remote is preliminary protocol evidence, not the compatibility claim.
+- The release target requires all four physical devices. The inexpensive `AR`
+  remote and each genuine or compatible remote are separate compatibility
+  claims; passing one never substitutes for another.
 - A voice-button press starts one push-to-talk Assist run; releasing it ends
   the input cleanly. Ordinary buttons continue to use the existing event
   entity contract.
@@ -340,9 +345,10 @@ Passing one cell never implies support for another.
   voice handling must consume the manager's raw notification callback, bound
   queues, and apply an explicit packet-loss policy rather than using event
   entity state as an audio transport.
-- This proves that the integration can recover microphone audio from the `AR`.
-  It does not promote `AR` to the v0.2.0 compatibility target; framing,
-  transport stability, and start/stop behavior must be repeated with the
+- This proves that the integration can recover microphone audio from the exact
+  tested `AR` variant, which is the compatible-Fire cell in the v0.2.0 matrix.
+  It does not imply support for other Fire-style look-alikes; framing,
+  transport stability, and start/stop behavior must also be repeated with the
   genuine Fire TV remote.
 
 #### Implemented pre-hardware slice (unreleased, 2026-08-15)
@@ -365,7 +371,7 @@ Passing one cell never implies support for another.
   intent handling; with a player configured, TTS is sent to that player and
   the satellite is explicitly returned to idle.
 - This is implementation evidence only. Release, version changes, tags, and
-  compatibility claims remain blocked until genuine Fire TV hardware testing.
+  compatibility claims remain blocked until the four-device matrix passes.
 
 #### Genuine Google TV Remote protocol research (2026-08-15)
 
@@ -407,18 +413,17 @@ Passing one cell never implies support for another.
   feeds the same per-device Assist satellite used by the HOGP/Opus path. A
   genuine-device run recognized `今、何時ですか？` exactly and completed the
   Intent stage successfully.
-- This establishes the genuine Google transport but does not complete v0.3.0:
-  the separately purchased compatible Google TV remote remains an independent
-  required test target. It also does not unblock v0.2.0, whose release gate is
-  still genuine Fire TV hardware.
+- This establishes the genuine Google transport but does not complete v0.2.0:
+  the separately purchased compatible Google TV remote and genuine Fire TV
+  remote remain independent required test targets.
 
 [google-atvv-gatt]: https://android.googlesource.com/platform/hardware/telink/atv/refDesignRcu/+/refs/heads/master/vendor/827x_ble_remote/app_att.c
 [google-atvv-control]: https://android.googlesource.com/platform/hardware/telink/atv/refDesignRcu/+/86f501098fb4ba60954cb046201ffe43ca360c3e/application/audio/gl_audio.h
 
-### v0.3.0: Google TV Voice Remote support
+### Remaining v0.2.0 Google-compatible validation
 
-- Add Assist input for a genuine Google TV Voice Remote after documenting its
-  non-key GATT voice transport and host-side session control.
+- Keep the implemented genuine Google TV ATVV session control behind the
+  common Assist interface and verify reconnect, timeout, and unload behavior.
 - Test the separately purchased Google TV-compatible remote independently.
   Its appearance and button layout do not imply protocol compatibility: record
   whether it reproduces Google's voice GATT services, uses generic

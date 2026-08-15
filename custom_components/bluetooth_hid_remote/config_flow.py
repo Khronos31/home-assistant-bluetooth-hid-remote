@@ -32,6 +32,7 @@ from .const import (
     DOMAIN,
     HID_SERVICE_UUID,
     KEY_PROFILE_ANDROID_TV,
+    KEY_PROFILE_GOOGLE_TV,
     KEY_PROFILE_HID,
 )
 from .keymap import KeyMapError, async_load_custom_profiles
@@ -257,7 +258,7 @@ class BluetoothHidRemoteConfigFlow(ConfigFlow, domain=DOMAIN):
                 title=self._discovery.name,
                 data={
                     CONF_ADDRESS: self._discovery.address,
-                    CONF_KEY_PROFILE: KEY_PROFILE_HID,
+                    CONF_KEY_PROFILE: KEY_PROFILE_ANDROID_TV,
                     CONF_NAME: self._discovery.name,
                 },
             )
@@ -405,7 +406,8 @@ class BluetoothHidRemoteOptionsFlow(OptionsFlow):
 
         labels = {
             KEY_PROFILE_HID: "HID",
-            KEY_PROFILE_ANDROID_TV: "Android TV",
+            KEY_PROFILE_ANDROID_TV: "Android TV / Fire TV",
+            KEY_PROFILE_GOOGLE_TV: "Google TV",
             **{name: f"Custom: {name}" for name in sorted(custom_profiles)},
         }
         available_profiles = set(labels)

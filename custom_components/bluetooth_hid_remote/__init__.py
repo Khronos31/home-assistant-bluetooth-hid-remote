@@ -12,7 +12,6 @@ from .const import (
     CONF_ADDRESS,
     CONF_KEY_PROFILE,
     KEY_PROFILE_ANDROID_TV,
-    KEY_PROFILE_HID,
     PLATFORMS,
 )
 from .keymap import KeyMapError, async_create_key_mapper
@@ -29,7 +28,7 @@ async def async_setup_entry(
 ) -> bool:
     """Set up a Bluetooth HID remote from a config entry."""
     profile = entry.options.get(
-        CONF_KEY_PROFILE, entry.data.get(CONF_KEY_PROFILE, KEY_PROFILE_HID)
+        CONF_KEY_PROFILE, entry.data.get(CONF_KEY_PROFILE, KEY_PROFILE_ANDROID_TV)
     )
     try:
         key_mapper = await async_create_key_mapper(hass, profile)

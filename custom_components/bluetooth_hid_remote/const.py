@@ -10,6 +10,7 @@ CONF_NAME: Final = "name"
 CONF_VOICE_RESPONSE_PLAYER: Final = "voice_response_player"
 
 KEY_PROFILE_ANDROID_TV: Final = "android_tv"
+KEY_PROFILE_GOOGLE_TV: Final = "google_tv"
 KEY_PROFILE_HID: Final = "hid"
 KEYMAP_FILENAME: Final = "bluetooth_hid_remote_keymaps.yaml"
 
@@ -21,8 +22,7 @@ HID_REPORT_REFERENCE_UUID: Final = "00002908-0000-1000-8000-00805f9b34fb"
 HID_REPORT_TYPE_INPUT: Final = 1
 
 # Android TV Voice (ATVV) GATT service used by genuine Google TV remotes.
-# The current integration observes only notification metadata while this
-# transport is being researched; it does not persist Google voice audio.
+# Audio remains in a bounded in-memory Assist session and is never entity state.
 ATVV_SERVICE_UUID: Final = "ab5e0001-5a21-4f05-bc7d-af01f617b664"
 ATVV_TX_UUID: Final = "ab5e0002-5a21-4f05-bc7d-af01f617b664"
 ATVV_RX_UUID: Final = "ab5e0003-5a21-4f05-bc7d-af01f617b664"

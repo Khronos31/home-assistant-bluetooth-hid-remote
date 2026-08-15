@@ -21,7 +21,8 @@ Current version: **0.1.0**.
 - A directly attached HAOS Bluetooth adapter.
 - First-time pairing from the Home Assistant config flow through BlueZ.
 - Event data always retains the raw report and canonical HID identity.
-- Selectable HID and Android TV key profiles, plus optional custom YAML maps.
+- Selectable HID, Android TV / Fire TV, and Google TV key profiles, plus
+  optional custom YAML maps.
 - BlueZ owns the HOGP connection; the integration must not alter its lifetime.
 - Devices with malformed GATT tables may fail BlueZ service discovery. One
   tested `AR` remote has an explicit, opt-in HAOS compatibility repair; other
@@ -41,10 +42,10 @@ is not intended to become a general-purpose Bluetooth input integration:
   may allow one to connect, but pointer reports, buttons, motion, and resulting
   HAOS behavior are unsupported.
 
-Voice support is planned against four separate physical test devices: genuine
-and compatible Fire TV remotes for v0.2.0, followed by genuine and compatible
-Google TV remotes for v0.3.0. A compatible remote is treated as an independent
-protocol implementation, not assumed equivalent from its appearance.
+Voice support is planned for v0.2.0 against four separate physical test
+devices: genuine and compatible Fire TV remotes, and genuine and compatible
+Google TV remotes. A compatible remote is treated as an independent protocol
+implementation, not assumed equivalent from its appearance.
 
 ## Key profiles and event data
 
@@ -67,18 +68,20 @@ The built-in profiles are:
   HID `0x0007:0x00F1` becomes Android `BACK`/`4`. Intermediate Linux input codes
   are never exposed. Unmapped usages are explicit as `UNKNOWN`/`0` while the
   HID fields remain available.
-- **Google TV** (planned for v0.3.0): extends the Android key namespace with the
-  device-family mappings verified against genuine and compatible Google TV
-  remotes.
+- **Google TV**: extends the Android key namespace with the proprietary
+  low-numbered HID usages observed on the genuine Google TV Remote. Its fifteen
+  verified buttons include navigation, volume, voice assist, app shortcuts,
+  power, and favorites. Unobserved usages retain the Android TV fallback.
 
 Optional custom YAML profiles remain supported for unusual hardware and local
 overrides. They are an advanced compatibility escape hatch, not required for
 the project's tested hardware once an observed mapping can be attributed to a
 supported public device family.
 
-Existing 0.1.x entries migrate to Android TV to preserve their previous
-remote-oriented names. Change the profile from the integration's Configure
-dialog. With Android TV selected, a single decoded key looks like:
+Existing 0.1.x entries migrate to Android TV / Fire TV to preserve their
+previous remote-oriented names, and new entries use the same default. Change
+the profile from the integration's Configure dialog. With Android TV / Fire TV
+selected, a single decoded key looks like:
 
 ```yaml
 event_type: key_pressed
@@ -157,9 +160,9 @@ service brands into the integration.
 
 ## Installation
 
-Before the first tagged release, add this repository to HACS as a custom
-**Integration** repository only if you are participating in hardware
-validation. Tagged releases are installed through HACS in the usual way.
+Add this repository to HACS as a custom **Integration** repository. Tagged
+releases are installed through HACS in the usual way; `main` may contain
+unreleased hardware-validation work.
 
 After installation and a Home Assistant restart, put a BLE HOGP remote in
 pairing mode and add **Bluetooth HID Remote** from Settings > Devices & services.

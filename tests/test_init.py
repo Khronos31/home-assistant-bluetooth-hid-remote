@@ -24,6 +24,7 @@ from custom_components.bluetooth_hid_remote.const import (
     CONF_NAME,
     CONF_VOICE_RESPONSE_PLAYER,
     KEY_PROFILE_ANDROID_TV,
+    KEY_PROFILE_GOOGLE_TV,
     KEY_PROFILE_HID,
 )
 from custom_components.bluetooth_hid_remote.pairing import (
@@ -145,6 +146,25 @@ async def test_voice_response_option_preserves_key_profile() -> None:
 
 
 @pytest.mark.asyncio
+async def test_google_tv_is_a_public_key_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The genuine Google TV mapping is selectable without local YAML."""
+    flow, _entry = _new_options_flow()
+    flow.async_create_entry = lambda **kwargs: kwargs
+    monkeypatch.setattr(
+        "custom_components.bluetooth_hid_remote.config_flow.async_load_custom_profiles",
+        AsyncMock(return_value={}),
+    )
+
+    result = await flow.async_step_key_profile(
+        {CONF_KEY_PROFILE: KEY_PROFILE_GOOGLE_TV}
+    )
+
+    assert result["data"] == {CONF_KEY_PROFILE: KEY_PROFILE_GOOGLE_TV}
+
+
+@pytest.mark.asyncio
 async def test_confirmed_bond_rebuild_unloads_pairs_and_restores_protection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -225,8 +245,10 @@ async def test_entry_deletion_removes_only_its_bond(
 
 
 @pytest.mark.asyncio
-async def test_new_entries_default_to_hid(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A newly discovered remote starts in the standards-based HID profile."""
+async def test_new_entries_default_to_android_tv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newly discovered media remote starts in the useful Android profile."""
     pair = AsyncMock()
     monkeypatch.setattr(
         "custom_components.bluetooth_hid_remote.config_flow.async_pair_hogp_device",
@@ -243,7 +265,7 @@ async def test_new_entries_default_to_hid(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert result["data"] == {
         CONF_ADDRESS: "00:11:22:33:44:55",
-        CONF_KEY_PROFILE: KEY_PROFILE_HID,
+        CONF_KEY_PROFILE: KEY_PROFILE_ANDROID_TV,
         CONF_NAME: "Remote",
     }
     pair.assert_awaited_once_with("00:11:22:33:44:55")
@@ -407,7 +429,7 @@ async def test_confirmed_stale_bond_replacement_creates_entry(
 
     assert result["data"] == {
         CONF_ADDRESS: "00:11:22:33:44:55",
-        CONF_KEY_PROFILE: KEY_PROFILE_HID,
+        CONF_KEY_PROFILE: KEY_PROFILE_ANDROID_TV,
         CONF_NAME: "Remote",
     }
     pair.assert_awaited_once_with("00:11:22:33:44:55", replace_existing=True)
@@ -490,3 +512,21 @@ async def test_version_one_entries_migrate_to_android_tv() -> None:
             "version": 2,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_current_entries_do_not_repeat_migration() -> None:
+    """Reloading an already migrated entry never rewrites its stored data."""
+    update = AsyncMock()
+    hass = SimpleNamespace(config_entries=SimpleNamespace(async_update_entry=update))
+    entry = SimpleNamespace(
+        version=2,
+        data={
+            CONF_ADDRESS: "00:11:22:33:44:55",
+            CONF_NAME: "Remote",
+            CONF_KEY_PROFILE: KEY_PROFILE_ANDROID_TV,
+        },
+    )
+
+    assert await async_migrate_entry(hass, entry) is True
+    update.assert_not_awaited()
