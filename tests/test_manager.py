@@ -2,8 +2,10 @@
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from bleak.backends.bluezdbus import defs
 from dbus_fast.constants import MessageType
 
 from custom_components.bluetooth_hid_remote.const import (
@@ -17,10 +19,45 @@ from custom_components.bluetooth_hid_remote.hid import HidReportDecoder, HidUsag
 from custom_components.bluetooth_hid_remote.manager import (
     BluetoothHidRemoteManager,
     HidInputReport,
+    bluez_device_path_from_address,
     characteristic_handle_from_path,
     event_type_for_report,
     parse_report_reference,
 )
+
+
+@pytest.mark.asyncio
+async def test_manager_start_failure_releases_input_grab() -> None:
+    """A partial setup cannot leave the console keyboard exclusively owned."""
+    entry = SimpleNamespace(
+        data={"address": "00:11:22:33:44:55", "name": "Remote"},
+        async_create_background_task=lambda *_args, **_kwargs: None,
+    )
+    manager = BluetoothHidRemoteManager(object(), entry, SimpleNamespace())
+    manager.input_grabber = SimpleNamespace(
+        async_start=AsyncMock(), async_stop=AsyncMock()
+    )
+    manager._async_register_bluez_watcher = AsyncMock(side_effect=RuntimeError)
+
+    with pytest.raises(RuntimeError):
+        await manager.async_start()
+
+    manager.input_grabber.async_start.assert_awaited_once_with()
+    manager.input_grabber.async_stop.assert_awaited_once_with()
+
+
+def test_bluez_path_falls_back_to_the_direct_adapter_by_address() -> None:
+    """A proxy-preferred HA device cannot hide the local BlueZ device path."""
+    expected_path = "/org/bluez/hci1/dev_88_34_37_C9_CA_71"
+    manager = SimpleNamespace(
+        _properties={
+            "/org/bluez/hci0": {defs.ADAPTER_INTERFACE: {"Address": "local"}},
+            expected_path: {defs.DEVICE_INTERFACE: {"Address": "88:34:37:C9:CA:71"}},
+        }
+    )
+
+    assert bluez_device_path_from_address(manager, "88:34:37:c9:ca:71") == expected_path
+    assert bluez_device_path_from_address(manager, "00:00:00:00:00:00") is None
 
 
 def test_bluez_connection_only_updates_passive_state() -> None:
@@ -30,7 +67,10 @@ def test_bluez_connection_only_updates_passive_state() -> None:
     manager.connected = False
     manager.input_report_count = 3
     manager._report_metadata_by_path = {"path": (1, 2)}
+    manager._ignored_value_paths = {"metadata"}
+    manager._initial_cached_values_by_path = {"path": b"cached"}
     manager._active_usages_by_path = {}
+    manager._active_report_paths = {"path"}
     manager._notification_paths = {"path"}
     manager._stopping = False
 
@@ -45,6 +85,9 @@ def test_bluez_connection_only_updates_passive_state() -> None:
     assert not manager.connected
     assert manager.input_report_count == 0
     assert manager._report_metadata_by_path == {}
+    assert manager._ignored_value_paths == set()
+    assert manager._initial_cached_values_by_path == {}
+    assert manager._active_report_paths == set()
     assert manager._notification_paths == set()
 
     manager._async_bluez_connected_changed(True)
@@ -73,12 +116,22 @@ async def test_notifications_use_existing_bluez_bus_and_are_released() -> None:
     manager.address = "00:11:22:33:44:55"
     manager.connected = True
     manager.connection_failures = 0
-    manager._bluez_manager = SimpleNamespace(_bus=bus)
+    paths = ["/service0010/char0012", "/service0010/char0014"]
+    manager._bluez_manager = SimpleNamespace(
+        _bus=bus,
+        _properties={
+            paths[0]: {
+                defs.GATT_CHARACTERISTIC_INTERFACE: {
+                    "Value": bytearray.fromhex("f10000")
+                }
+            }
+        },
+    )
     manager._notification_lock = asyncio.Lock()
     manager._notification_paths = set()
+    manager._initial_cached_values_by_path = {}
     manager._stopping = False
 
-    paths = ["/service0010/char0012", "/service0010/char0014"]
     await manager._async_start_notifications(paths)
     await manager._async_start_notifications(paths)
 
@@ -87,6 +140,7 @@ async def test_notifications_use_existing_bluez_bus_and_are_released() -> None:
         "StartNotify",
     ]
     assert manager._notification_paths == set(paths)
+    assert manager._initial_cached_values_by_path == {paths[0]: bytes.fromhex("f10000")}
 
     await manager._async_stop_notifications()
     assert [message.member for message in bus.calls] == [
@@ -96,6 +150,7 @@ async def test_notifications_use_existing_bluez_bus_and_are_released() -> None:
         "StopNotify",
     ]
     assert manager._notification_paths == set()
+    assert manager._initial_cached_values_by_path == {}
 
 
 @pytest.mark.asyncio
@@ -123,9 +178,10 @@ async def test_late_subscription_is_released_while_stopping() -> None:
     manager.address = "00:11:22:33:44:55"
     manager.connected = True
     manager.connection_failures = 0
-    manager._bluez_manager = SimpleNamespace(_bus=bus)
+    manager._bluez_manager = SimpleNamespace(_bus=bus, _properties={})
     manager._notification_lock = asyncio.Lock()
     manager._notification_paths = set()
+    manager._initial_cached_values_by_path = {}
     manager._stopping = False
 
     await manager._async_start_notifications(["/service0010/char0012"])
@@ -186,6 +242,8 @@ async def test_hid_metadata_is_loaded_from_existing_bluez_connection() -> None:
     manager.connected = True
     manager._stopping = False
     manager._bluez_manager = SimpleNamespace(_bus=Bus())
+    manager._ignored_value_paths = set()
+    manager._initial_cached_values_by_path = {}
     manager._report_decoder = None
     manager.report_map = None
     metadata = {report_path: (0, 0x5D)}
@@ -195,7 +253,7 @@ async def test_hid_metadata_is_loaded_from_existing_bluez_connection() -> None:
     assert manager.report_map == keyboard_map
     assert metadata == {report_path: (1, 0x5D)}
     assert manager._report_decoder.decode(1, bytes.fromhex("580000")) == (
-        HidUsage(0x07, 0x58, "Keypad Enter"),
+        HidUsage(0x07, 0x58, "Keypad ENTER"),
     )
 
 
@@ -204,8 +262,11 @@ def test_unmapped_bluez_value_is_published_with_path_handle() -> None:
     manager = object.__new__(BluetoothHidRemoteManager)
     manager.address = "00:11:22:33:44:55"
     manager._report_metadata_by_path = {}
+    manager._ignored_value_paths = set()
+    manager._initial_cached_values_by_path = {}
     manager._report_decoder = None
     manager._active_usages_by_path = {}
+    manager._active_report_paths = set()
     manager.last_report = None
     received: list[HidInputReport] = []
     manager._listeners = {received.append}
@@ -221,10 +282,13 @@ def test_decoded_usage_is_carried_from_press_to_release() -> None:
     manager.address = "00:11:22:33:44:55"
     path = "/org/bluez/hci0/dev_x/service004f/char005d"
     manager._report_metadata_by_path = {path: (1, 0x5D)}
+    manager._ignored_value_paths = set()
+    manager._initial_cached_values_by_path = {}
     manager._report_decoder = HidReportDecoder.from_report_map(
         bytes.fromhex("0507850195037508150025ff190029ff8100")
     )
     manager._active_usages_by_path = {}
+    manager._active_report_paths = set()
     manager.last_report = None
     received: list[HidInputReport] = []
     manager._listeners = {received.append}
@@ -232,7 +296,7 @@ def test_decoded_usage_is_carried_from_press_to_release() -> None:
     manager._async_bluez_value_changed(path, bytes.fromhex("580000"))
     manager._async_bluez_value_changed(path, bytes.fromhex("000000"))
 
-    usage = HidUsage(0x07, 0x58, "Keypad Enter")
+    usage = HidUsage(0x07, 0x58, "Keypad ENTER")
     assert received == [
         HidInputReport(1, 0x5D, bytes.fromhex("580000"), (usage,)),
         HidInputReport(1, 0x5D, bytes.fromhex("000000"), (usage,)),
@@ -246,11 +310,14 @@ def test_undecodable_nonzero_report_clears_stale_active_usage() -> None:
     manager.address = "00:11:22:33:44:55"
     path = "/org/bluez/hci0/dev_x/service004f/char005d"
     manager._report_metadata_by_path = {path: (2, 0x5D)}
+    manager._ignored_value_paths = set()
+    manager._initial_cached_values_by_path = {}
     manager._report_decoder = HidReportDecoder.from_report_map(
         bytes.fromhex("0507850195037508150025ff190029ff8100")
     )
-    stale = HidUsage(0x07, 0x58, "Keypad Enter")
+    stale = HidUsage(0x07, 0x58, "Keypad ENTER")
     manager._active_usages_by_path = {path: (stale,)}
+    manager._active_report_paths = set()
     manager.last_report = None
     received: list[HidInputReport] = []
     manager._listeners = {received.append}
@@ -263,6 +330,92 @@ def test_undecodable_nonzero_report_clears_stale_active_usage() -> None:
         HidInputReport(2, 0x5D, bytes.fromhex("000000")),
     ]
     assert manager._active_usages_by_path == {}
+
+
+def test_static_report_map_value_is_not_published_as_a_key() -> None:
+    """A Report Map read observed by BlueZ cannot create a false press event."""
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    path = "/org/bluez/hci0/dev_x/service004f/char0055"
+    manager._ignored_value_paths = {path}
+    manager._initial_cached_values_by_path = {}
+    manager._report_metadata_by_path = {}
+    manager._report_decoder = None
+    manager._active_usages_by_path = {}
+    manager._active_report_paths = set()
+    manager.last_report = None
+    received: list[HidInputReport] = []
+    manager._listeners = {received.append}
+
+    manager._async_bluez_value_changed(path, bytes.fromhex("05010906a101"))
+
+    assert received == []
+    assert manager.last_report is None
+
+
+def test_idle_release_without_a_preceding_press_is_not_published() -> None:
+    """StartNotify's initial zero value cannot create a false release event."""
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    path = "/org/bluez/hci0/dev_x/service004f/char005d"
+    manager._ignored_value_paths = set()
+    manager._initial_cached_values_by_path = {}
+    manager._report_metadata_by_path = {path: (1, 0x5D)}
+    manager._report_decoder = None
+    manager._active_usages_by_path = {}
+    manager._active_report_paths = set()
+    manager.last_report = None
+    received: list[HidInputReport] = []
+    manager._listeners = {received.append}
+
+    manager._async_bluez_value_changed(path, bytes.fromhex("000000"))
+
+    assert received == []
+    assert manager.last_report is None
+
+
+def test_initial_cached_press_and_its_idle_release_are_not_published() -> None:
+    """StartNotify replay of a cached nonzero value cannot create a false key."""
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    path = "/org/bluez/hci0/dev_x/service004f/char005d"
+    manager._ignored_value_paths = set()
+    manager._initial_cached_values_by_path = {path: bytes.fromhex("f10000")}
+    manager._report_metadata_by_path = {path: (1, 0x5D)}
+    manager._report_decoder = None
+    manager._active_usages_by_path = {}
+    manager._active_report_paths = set()
+    manager.last_report = None
+    received: list[HidInputReport] = []
+    manager._listeners = {received.append}
+
+    manager._async_bluez_value_changed(path, bytes.fromhex("f10000"))
+    manager._async_bluez_value_changed(path, bytes.fromhex("000000"))
+
+    assert received == []
+    assert manager.last_report is None
+    assert manager._initial_cached_values_by_path == {}
+
+
+def test_first_real_press_differing_from_cached_value_is_published() -> None:
+    """Snapshot suppression cannot consume a different first physical press."""
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    path = "/org/bluez/hci0/dev_x/service004f/char005d"
+    manager._ignored_value_paths = set()
+    manager._initial_cached_values_by_path = {path: bytes.fromhex("f10000")}
+    manager._report_metadata_by_path = {path: (1, 0x5D)}
+    manager._report_decoder = None
+    manager._active_usages_by_path = {}
+    manager._active_report_paths = set()
+    manager.last_report = None
+    received: list[HidInputReport] = []
+    manager._listeners = {received.append}
+
+    manager._async_bluez_value_changed(path, bytes.fromhex("580000"))
+
+    assert received == [HidInputReport(1, 0x5D, bytes.fromhex("580000"))]
+    assert manager._initial_cached_values_by_path == {}
 
 
 def test_characteristic_handle_from_path() -> None:

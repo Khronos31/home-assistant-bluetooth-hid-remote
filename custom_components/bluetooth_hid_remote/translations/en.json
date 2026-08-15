@@ -3,21 +3,70 @@
     "abort": {
       "device_not_found": "The Bluetooth HID remote is no longer visible.",
       "no_devices_found": "No connectable BLE HID-over-GATT remotes were found.",
+      "not_direct": "The remote is visible only through a Bluetooth proxy. Pairing requires an adapter directly attached to Home Assistant OS.",
       "not_hogp": "The discovered device does not advertise HID-over-GATT."
+    },
+    "error": {
+      "device_not_found": "The remote is no longer visible on the directly attached Bluetooth adapter.",
+      "compatibility_repair_failed": "Home Assistant could not install the AR compatibility cache. Bluetooth was restarted. See the integration log for details.",
+      "compatibility_repair_unsupported": "This host or remote does not match the tested AR compatibility repair.",
+      "pairing_failed": "Bluetooth pairing failed. Put the remote back in pairing mode and try again.",
+      "pairing_rejected": "The remote or BlueZ rejected pairing. Put the remote back in pairing mode and try again.",
+      "pairing_timeout": "Bluetooth pairing timed out. Keep the remote close to the adapter and in pairing mode, then try again.",
+      "pairing_verification_failed": "BlueZ did not create a complete HID-over-GATT bond. Reset the remote's pairing and try again.",
+      "service_pending_after_repair": "The compatibility cache was installed, but BlueZ has not loaded the HID service yet. Press a remote button, wait a moment, and try again. Do not replace the bond."
+    },
+    "progress": {
+      "pairing": "Pairing {name} with Home Assistant. Keep the remote close and in pairing mode.",
+      "repairing_compatibility": "Installing the verified AR compatibility cache. Bluetooth devices will briefly disconnect.",
+      "replacing_bond": "Removing and replacing the unusable bond for {name}. Keep only this remote in pairing mode.",
+      "verifying_service": "Checking whether BlueZ has exposed the HID service for {name}. Press a button to wake the remote."
     },
     "step": {
       "bluetooth_confirm": {
-        "description": "Add {name} as a Bluetooth HID remote? The initial development build requires the device to be paired already."
+        "description": "Put {name} in pairing mode, keep it close to Home Assistant's directly attached Bluetooth adapter, then submit to pair and add it. Home Assistant will authorize only this selected HID remote."
+      },
+      "compatibility_repair": {
+        "description": "{name} is paired and bonded, but this tested AR model returns a malformed GATT table that BlueZ cannot discover. Continue to install a known non-secret HID cache for this device. Home Assistant will briefly restart the host Bluetooth service. Bond keys are not read or modified; only this device's GATT cache is backed up and replaced."
+      },
+      "compatibility_wake": {
+        "description": "The AR compatibility cache was installed and Bluetooth restarted. Press any button on {name} to wake it, wait two seconds, then submit to verify the HID service. Do not reset or re-pair the remote."
+      },
+      "replace_bond": {
+        "description": "BlueZ has an existing bond for {name}, but it no longer exposes usable HID services. This commonly happens after resetting the remote. Continue only after putting this remote in pairing mode. Home Assistant will remove and replace the bond for this selected device only."
+      },
+      "service_pending": {
+        "description": "Pairing and bonding for {name} succeeded, but BlueZ has not exported its HID service objects yet. Press a button to wake the remote, then submit to verify again. The completed bond is preserved. If the service is still unavailable, a separate confirmation will offer to replace only this device's bond."
       },
       "user": {
         "data": {
           "address": "Remote"
         },
-        "description": "Select a visible BLE HID-over-GATT remote."
+        "description": "Select a visible BLE HID-over-GATT remote. First-time pairing works only through a Bluetooth adapter directly attached to Home Assistant OS."
+      }
+    }
+  },
+  "options": {
+    "error": {
+      "invalid_keymap": "The custom keymap file is invalid. Check bluetooth_hid_remote_keymaps.yaml and reload this form.",
+      "invalid_profile": "Select an available key profile."
+    },
+    "step": {
+      "init": {
+        "data": {
+          "key_profile": "Key profile"
+        },
+        "description": "Choose the numeric and naming namespace exposed by the event and sensor entities. Custom profiles are loaded from /config/bluetooth_hid_remote_keymaps.yaml.",
+        "title": "Key profile"
       }
     }
   },
   "entity": {
+    "binary_sensor": {
+      "console_input_protection": {
+        "name": "Console input protection"
+      }
+    },
     "event": {
       "remote_button": {
         "name": "Remote button",
@@ -29,6 +78,14 @@
             }
           }
         }
+      }
+    },
+    "sensor": {
+      "last_key": {
+        "name": "Last key"
+      },
+      "last_key_code": {
+        "name": "Last key code"
       }
     }
   }

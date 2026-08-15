@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from hid_parser.data import UsagePages
+
 
 @dataclass(frozen=True, slots=True)
 class HidUsage:
@@ -194,80 +196,16 @@ def _usage_for_value(
 
 def usage_page_name(page: int) -> str:
     """Return the HID Usage Tables page name used in event attributes."""
-    names = {
-        0x01: "Generic Desktop",
-        0x06: "Generic Device Controls",
-        0x07: "Keyboard/Keypad",
-        0x09: "Button",
-        0x0C: "Consumer",
-    }
-    if page >= 0xFF00:
-        return "Vendor-defined"
-    return names.get(page, f"Usage Page 0x{page:02X}")
+    try:
+        return UsagePages.get_description(page)
+    except KeyError:
+        return f"Usage Page 0x{page:02X}"
 
 
 def usage_name(page: int, usage_id: int) -> str | None:
-    """Resolve common keyboard and consumer usages without hiding unknown IDs."""
-    if page == 0x07:
-        if 0x04 <= usage_id <= 0x1D:
-            return f"Keyboard {chr(ord('A') + usage_id - 0x04)}"
-        if 0x1E <= usage_id <= 0x26:
-            return f"Keyboard {usage_id - 0x1D}"
-        if usage_id == 0x27:
-            return "Keyboard 0"
-        return _KEYBOARD_NAMES.get(usage_id)
-    if page == 0x0C:
-        return _CONSUMER_NAMES.get(usage_id)
-    return None
-
-
-_KEYBOARD_NAMES = {
-    0x28: "Keyboard Enter",
-    0x29: "Keyboard Escape",
-    0x2A: "Keyboard Backspace",
-    0x2B: "Keyboard Tab",
-    0x2C: "Keyboard Space",
-    0x3A: "Keyboard F1",
-    0x3B: "Keyboard F2",
-    0x3C: "Keyboard F3",
-    0x3D: "Keyboard F4",
-    0x3E: "Keyboard F5",
-    0x3F: "Keyboard F6",
-    0x40: "Keyboard F7",
-    0x41: "Keyboard F8",
-    0x42: "Keyboard F9",
-    0x43: "Keyboard F10",
-    0x44: "Keyboard F11",
-    0x45: "Keyboard F12",
-    0x4A: "Keyboard Home",
-    0x4B: "Keyboard Page Up",
-    0x4C: "Keyboard Delete Forward",
-    0x4D: "Keyboard End",
-    0x4E: "Keyboard Page Down",
-    0x4F: "Keyboard Right Arrow",
-    0x50: "Keyboard Left Arrow",
-    0x51: "Keyboard Down Arrow",
-    0x52: "Keyboard Up Arrow",
-    0x54: "Keypad Divide",
-    0x55: "Keypad Multiply",
-    0x56: "Keypad Subtract",
-    0x57: "Keypad Add",
-    0x58: "Keypad Enter",
-}
-
-_CONSUMER_NAMES = {
-    0x30: "Power",
-    0x40: "Menu",
-    0xB0: "Play",
-    0xB1: "Pause",
-    0xB2: "Record",
-    0xB3: "Fast Forward",
-    0xB4: "Rewind",
-    0xB5: "Scan Next Track",
-    0xB6: "Scan Previous Track",
-    0xB7: "Stop",
-    0xCD: "Play/Pause",
-    0xE2: "Mute",
-    0xE9: "Volume Increment",
-    0xEA: "Volume Decrement",
-}
+    """Resolve a usage through the comprehensive HID Usage Tables database."""
+    try:
+        usage_data = UsagePages.get_subdata(page)
+        return usage_data.get_description(usage_id)
+    except (KeyError, ValueError):
+        return None

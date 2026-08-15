@@ -13,6 +13,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import BluetoothHidRemoteConfigEntry
 from .const import DOMAIN, EVENT_TYPES
+from .keymap import KeyMapper, mapped_key_attributes
 from .manager import HidInputReport
 
 DESCRIPTION = EventEntityDescription(
@@ -23,24 +24,14 @@ DESCRIPTION = EventEntityDescription(
 )
 
 
-def event_attributes(report: HidInputReport) -> dict:
+def event_attributes(report: HidInputReport, mapper: KeyMapper) -> dict:
     """Build backward-compatible raw and decoded event attributes."""
     attributes = {
         "report_id": report.report_id,
         "characteristic_handle": report.characteristic_handle,
         "data_hex": report.data.hex(),
     }
-    keys = [
-        {
-            "usage_page": usage.usage_page,
-            "usage_page_hex": f"0x{usage.usage_page:02X}",
-            "usage_page_name": usage.usage_page_name,
-            "key_code": usage.usage_id,
-            "key_code_hex": f"0x{usage.usage_id:02X}",
-            "key_name": usage.name,
-        }
-        for usage in report.usages
-    ]
+    keys = [mapped_key_attributes(mapper, usage) for usage in report.usages]
     if keys:
         attributes["keys"] = keys
     if len(keys) == 1:
@@ -85,6 +76,6 @@ class BluetoothHidRemoteEvent(EventEntity):
         """Publish one raw report as a press or release event."""
         self._trigger_event(
             report.event_type,
-            event_attributes(report),
+            event_attributes(report, self._manager.key_mapper),
         )
         self.async_write_ha_state()

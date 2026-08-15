@@ -36,6 +36,8 @@ from .const import (
     HID_SERVICE_UUID,
 )
 from .hid import HidReportDecoder, HidUsage
+from .input_grab import BluetoothInputGrabber, InputGrabStatus
+from .keymap import KeyMapper
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -79,12 +81,25 @@ def parse_report_reference(value: bytes) -> tuple[int, int] | None:
     return value[0], value[1]
 
 
+def bluez_device_path_from_address(manager: BlueZManager, address: str) -> str | None:
+    """Find a directly attached BlueZ device even if HA prefers a proxy."""
+    normalized_address = address.casefold()
+    for path, interfaces in manager._properties.items():
+        device = interfaces.get(defs.DEVICE_INTERFACE)
+        if device and device.get("Address", "").casefold() == normalized_address:
+            return path
+    return None
+
+
 class BluetoothHidRemoteManager:
     """Observe a HID connection owned by BlueZ without changing its lifetime."""
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+    def __init__(
+        self, hass: HomeAssistant, entry: ConfigEntry, key_mapper: KeyMapper
+    ) -> None:
         self.hass = hass
         self.entry = entry
+        self.key_mapper = key_mapper
         self.address: str = entry.data[CONF_ADDRESS]
         self.name: str = entry.data.get(CONF_NAME, "BLE HID Remote")
         self.connected = False
@@ -92,6 +107,12 @@ class BluetoothHidRemoteManager:
         self.report_map: bytes | None = None
         self.last_report: HidInputReport | None = None
         self.connection_failures = 0
+        self.input_grabber = BluetoothInputGrabber(
+            self.address,
+            task_factory=lambda coroutine, name: entry.async_create_background_task(
+                hass, coroutine, name=name
+            ),
+        )
 
         self._listeners: set[Callable[[HidInputReport], None]] = set()
         self._unsub_bluetooth: CALLBACK_TYPE | None = None
@@ -99,8 +120,11 @@ class BluetoothHidRemoteManager:
         self._bluez_watcher: DeviceWatcher | None = None
         self._device_path: str | None = None
         self._report_metadata_by_path: dict[str, tuple[int, int]] = {}
+        self._ignored_value_paths: set[str] = set()
+        self._initial_cached_values_by_path: dict[str, bytes] = {}
         self._report_decoder: HidReportDecoder | None = None
         self._active_usages_by_path: dict[str, tuple[HidUsage, ...]] = {}
+        self._active_report_paths: set[str] = set()
         self._notification_paths: set[str] = set()
         self._notification_lock = Lock()
         self._stopping = False
@@ -108,49 +132,69 @@ class BluetoothHidRemoteManager:
     async def async_start(self) -> None:
         """Register passive observers for BlueZ and HA Bluetooth discovery."""
         self._stopping = False
-        await self._async_register_bluez_watcher()
-        self._unsub_bluetooth = bluetooth.async_register_callback(
-            self.hass,
-            self._async_bluetooth_update,
-            BluetoothCallbackMatcher(address=self.address),
-            BluetoothScanningMode.PASSIVE,
-        )
+        await self.input_grabber.async_start()
+        try:
+            await self._async_register_bluez_watcher()
+            self._unsub_bluetooth = bluetooth.async_register_callback(
+                self.hass,
+                self._async_bluetooth_update,
+                BluetoothCallbackMatcher(address=self.address),
+                BluetoothScanningMode.PASSIVE,
+            )
+        except Exception:
+            await self.input_grabber.async_stop()
+            raise
 
     async def async_stop(self) -> None:
         """Remove observers without disconnecting the HID remote."""
         self._stopping = True
-        if self._unsub_bluetooth is not None:
-            self._unsub_bluetooth()
-            self._unsub_bluetooth = None
-        await self._async_stop_notifications()
-        if self._bluez_manager is not None and self._bluez_watcher is not None:
-            self._bluez_manager.remove_device_watcher(self._bluez_watcher)
-        self._bluez_watcher = None
-        self._bluez_manager = None
-        self._device_path = None
-        self.connected = False
-        self._active_usages_by_path.clear()
+        try:
+            if self._unsub_bluetooth is not None:
+                self._unsub_bluetooth()
+                self._unsub_bluetooth = None
+            await self._async_stop_notifications()
+            if self._bluez_manager is not None and self._bluez_watcher is not None:
+                self._bluez_manager.remove_device_watcher(self._bluez_watcher)
+            self._bluez_watcher = None
+            self._bluez_manager = None
+            self._device_path = None
+            self.connected = False
+            self._active_usages_by_path.clear()
+            self._active_report_paths.clear()
+            self._ignored_value_paths.clear()
+            self._initial_cached_values_by_path.clear()
+        finally:
+            await self.input_grabber.async_stop()
+
+    @property
+    def input_grab_status(self) -> InputGrabStatus:
+        """Return the current console-input protection state."""
+        return self.input_grabber.status
+
+    def async_add_input_grab_listener(
+        self, listener: Callable[[InputGrabStatus], None]
+    ) -> CALLBACK_TYPE:
+        """Subscribe an entity to console-input protection changes."""
+        return self.input_grabber.async_add_listener(listener)
 
     async def _async_register_bluez_watcher(self) -> None:
         """Observe the direct adapter's BlueZ device object."""
         if self._bluez_watcher is not None:
             return
 
+        manager = await get_global_bluez_manager()
         device = bluetooth.async_ble_device_from_address(self.hass, self.address, True)
-        if device is None:
+        details = device.details if device is not None else None
+        device_path = details.get("path") if isinstance(details, dict) else None
+        if not isinstance(device_path, str):
+            device_path = bluez_device_path_from_address(manager, self.address)
+        if device_path is None:
             _LOGGER.debug(
-                "Cannot register BlueZ watcher for %s before first discovery",
+                "Direct BlueZ device %s is unavailable; waiting for discovery",
                 self.address,
             )
             return
 
-        details = device.details
-        device_path = details.get("path") if isinstance(details, dict) else None
-        if not isinstance(device_path, str):
-            _LOGGER.debug("BLE device %s has no BlueZ object path", self.address)
-            return
-
-        manager = await get_global_bluez_manager()
         self._bluez_watcher = manager.add_device_watcher(
             device_path,
             self._async_bluez_connected_changed,
@@ -197,7 +241,10 @@ class BluetoothHidRemoteManager:
         _LOGGER.debug("BlueZ HID connection %s connected=%s", self.address, connected)
         if not connected:
             self._report_metadata_by_path.clear()
+            self._ignored_value_paths.clear()
+            self._initial_cached_values_by_path.clear()
             self._active_usages_by_path.clear()
+            self._active_report_paths.clear()
             self._notification_paths.clear()
             self.input_report_count = 0
             return
@@ -267,6 +314,9 @@ class BluetoothHidRemoteManager:
             report_map = service.get_characteristic(HID_REPORT_MAP_UUID)
             path = self._gatt_object_path(report_map)
             if path is not None:
+                # BlueZ reports the value read below through the same watcher
+                # used for notifications. It is descriptor metadata, not a key.
+                self._ignored_value_paths.add(path)
                 try:
                     self.report_map = await self._async_read_bluez_value(
                         path, defs.GATT_CHARACTERISTIC_INTERFACE
@@ -360,6 +410,7 @@ class BluetoothHidRemoteManager:
                     return
                 if path in self._notification_paths:
                     continue
+                self._capture_initial_cached_value(path)
                 try:
                     reply = await bus.call(
                         Message(
@@ -371,6 +422,7 @@ class BluetoothHidRemoteManager:
                     )
                     assert_gatt_reply(reply, start_notify=True)
                 except Exception:
+                    self._initial_cached_values_by_path.pop(path, None)
                     self.connection_failures += 1
                     _LOGGER.debug(
                         "Could not subscribe to BlueZ HID report %s for %s",
@@ -380,6 +432,7 @@ class BluetoothHidRemoteManager:
                     )
                     continue
                 if not self.connected or self._stopping:
+                    self._initial_cached_values_by_path.pop(path, None)
                     try:
                         reply = await bus.call(
                             Message(
@@ -403,6 +456,19 @@ class BluetoothHidRemoteManager:
                     "Subscribed to BlueZ HID report %s for %s", path, self.address
                 )
 
+    def _capture_initial_cached_value(self, path: str) -> None:
+        """Snapshot BlueZ's pre-subscription value for one input report."""
+        manager = self._bluez_manager
+        interfaces = manager._properties.get(path, {}) if manager is not None else {}
+        properties = interfaces.get(defs.GATT_CHARACTERISTIC_INTERFACE, {})
+        if "Value" not in properties:
+            self._initial_cached_values_by_path.pop(path, None)
+            return
+        try:
+            self._initial_cached_values_by_path[path] = bytes(properties["Value"])
+        except (TypeError, ValueError):
+            self._initial_cached_values_by_path.pop(path, None)
+
     async def _async_stop_notifications(self) -> None:
         """Release only notification subscriptions created by this manager."""
         manager = self._bluez_manager
@@ -410,6 +476,7 @@ class BluetoothHidRemoteManager:
         async with self._notification_lock:
             paths = tuple(self._notification_paths)
             self._notification_paths.clear()
+            self._initial_cached_values_by_path.clear()
             if bus is None or not bus.connected or not self.connected:
                 return
             for path in paths:
@@ -434,6 +501,18 @@ class BluetoothHidRemoteManager:
     @callback
     def _async_bluez_value_changed(self, path: str, value: bytes) -> None:
         """Publish a report already subscribed by BlueZ's HID profile."""
+        if path in self._ignored_value_paths:
+            _LOGGER.debug("Ignored static HID metadata value path=%s", path)
+            return
+        if path in self._initial_cached_values_by_path:
+            initial_value = self._initial_cached_values_by_path.pop(path)
+            if value == initial_value:
+                _LOGGER.debug(
+                    "Ignored initial cached HID value path=%s data=%s",
+                    path,
+                    value.hex(),
+                )
+                return
         metadata = self._report_metadata_by_path.get(path)
         if metadata is None:
             handle = characteristic_handle_from_path(path)
@@ -449,6 +528,13 @@ class BluetoothHidRemoteManager:
                 value.hex(),
             )
         report_id, characteristic_handle = metadata
+        if any(value):
+            self._active_report_paths.add(path)
+        elif path not in self._active_report_paths:
+            _LOGGER.debug("Ignored idle HID release value path=%s", path)
+            return
+        else:
+            self._active_report_paths.discard(path)
         usages: tuple[HidUsage, ...] = ()
         if self._report_decoder is not None:
             usages = self._report_decoder.decode(report_id, value)

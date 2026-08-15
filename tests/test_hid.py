@@ -6,6 +6,8 @@ from custom_components.bluetooth_hid_remote.hid import (
     HidReportDecoder,
     HidReportDescriptorError,
     HidUsage,
+    usage_name,
+    usage_page_name,
 )
 
 AR_REPORT_MAP = bytes.fromhex(
@@ -23,7 +25,7 @@ def test_ar_keyboard_report_decodes_keypad_enter() -> None:
     decoder = HidReportDecoder.from_report_map(AR_REPORT_MAP)
 
     assert decoder.decode(1, bytes.fromhex("580000")) == (
-        HidUsage(0x07, 0x58, "Keypad Enter"),
+        HidUsage(0x07, 0x58, "Keypad ENTER"),
     )
     assert decoder.decode(1, bytes.fromhex("000000")) == ()
 
@@ -33,8 +35,8 @@ def test_keyboard_array_decodes_multiple_simultaneous_usages() -> None:
     decoder = HidReportDecoder.from_report_map(AR_REPORT_MAP)
 
     assert decoder.decode(1, bytes.fromhex("580400")) == (
-        HidUsage(0x07, 0x58, "Keypad Enter"),
-        HidUsage(0x07, 0x04, "Keyboard A"),
+        HidUsage(0x07, 0x58, "Keypad ENTER"),
+        HidUsage(0x07, 0x04, "Keyboard a and A"),
     )
 
 
@@ -47,11 +49,13 @@ def test_ar_consumer_report_decodes_volume_increment() -> None:
     )
 
 
-def test_unknown_usage_keeps_numeric_identity() -> None:
-    """Unknown standard usages are exposed numerically instead of discarded."""
+def test_less_common_usage_keeps_numeric_identity_and_gets_a_name() -> None:
+    """The comprehensive table names usages outside a hand-curated subset."""
     decoder = HidReportDecoder.from_report_map(AR_REPORT_MAP)
 
-    assert decoder.decode(1, bytes.fromhex("a40000")) == (HidUsage(0x07, 0xA4, None),)
+    assert decoder.decode(1, bytes.fromhex("a40000")) == (
+        HidUsage(0x07, 0xA4, "Keyboard ExSel"),
+    )
 
 
 def test_variable_button_bits_use_descriptor_usage_positions() -> None:
@@ -60,9 +64,38 @@ def test_variable_button_bits_use_descriptor_usage_positions() -> None:
     decoder = HidReportDecoder.from_report_map(report_map)
 
     assert decoder.decode(0, bytes([0b101])) == (
-        HidUsage(0x09, 1, None),
-        HidUsage(0x09, 3, None),
+        HidUsage(0x09, 1, "Button 1 (primary/trigger)"),
+        HidUsage(0x09, 3, "Button 3 (tertiary)"),
     )
+
+
+@pytest.mark.parametrize(
+    ("page", "usage_id", "name"),
+    [
+        (0x07, 0x58, "Keypad ENTER"),
+        (0x07, 0x51, "Keyboard DownArrow"),
+        (0x07, 0x04, "Keyboard a and A"),
+        (0x07, 0x46, "Keyboard PrintScreen"),
+        (0x0C, 0x8C, "Media Select Telephone"),
+        (0x0C, 0x8D, "Media Select Program Guide"),
+        (0x0C, 0xE9, "Volume Increment"),
+        (0x0C, 0x223, "AC Home"),
+        (0x09, 3, "Button 3 (tertiary)"),
+        (0x07, 0xA4, "Keyboard ExSel"),
+    ],
+)
+def test_usage_names_cover_the_hid_usage_tables(
+    page: int, usage_id: int, name: str
+) -> None:
+    """The HID profile uses the comprehensive HID Usage Tables database."""
+    assert usage_name(page, usage_id) == name
+
+
+def test_unknown_usage_names_fall_back_cleanly() -> None:
+    """Unknown pages and usages retain their numeric canonical identity."""
+    assert usage_name(0xFFFF, 1) is None
+    assert usage_name(0x07, 0xFFFF) is None
+    assert usage_page_name(0x1234) == "Usage Page 0x1234"
 
 
 def test_truncated_descriptor_is_rejected() -> None:

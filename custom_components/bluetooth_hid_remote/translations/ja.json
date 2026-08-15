@@ -3,21 +3,70 @@
     "abort": {
       "device_not_found": "Bluetooth HIDリモコンが見つからなくなりました。",
       "no_devices_found": "接続可能なBLE HID-over-GATTリモコンが見つかりません。",
+      "not_direct": "このリモコンはBluetoothプロキシ経由でのみ見えています。ペアリングにはHome Assistant OSへ直接接続したBluetoothアダプターが必要です。",
       "not_hogp": "検出したデバイスはHID-over-GATTを広告していません。"
+    },
+    "error": {
+      "device_not_found": "Home Assistantへ直接接続したBluetoothアダプターからリモコンが見えなくなりました。",
+      "compatibility_repair_failed": "AR互換キャッシュを適用できませんでした。Bluetoothサービスは再起動済みです。統合ログを確認してください。",
+      "compatibility_repair_unsupported": "このホストまたはリモコンは、検証済みAR互換修復の対象と一致しません。",
+      "pairing_failed": "Bluetoothペアリングに失敗しました。リモコンをもう一度ペアリングモードにして再試行してください。",
+      "pairing_rejected": "リモコンまたはBlueZがペアリングを拒否しました。リモコンをもう一度ペアリングモードにして再試行してください。",
+      "pairing_timeout": "Bluetoothペアリングが時間切れになりました。リモコンをアダプターへ近づけ、ペアリングモードのまま再試行してください。",
+      "pairing_verification_failed": "BlueZで完全なHID-over-GATTボンドを確認できませんでした。リモコンのペアリングをリセットして再試行してください。",
+      "service_pending_after_repair": "互換キャッシュは適用済みですが、BlueZがHIDサービスをまだ読み込んでいません。リモコンのボタンを押し、少し待ってから再試行してください。ボンドは置換しないでください。"
+    },
+    "progress": {
+      "pairing": "{name}をHome Assistantとペアリングしています。リモコンを近くに置き、ペアリングモードを維持してください。",
+      "repairing_compatibility": "検証済みAR互換キャッシュを適用しています。Bluetooth機器は一時的に切断されます。",
+      "replacing_bond": "{name}の使用できないボンドを削除して作り直しています。このリモコンだけをペアリングモードにしてください。",
+      "verifying_service": "BlueZが{name}のHIDサービスを公開したか確認しています。ボタンを押してリモコンを起こしてください。"
     },
     "step": {
       "bluetooth_confirm": {
-        "description": "{name}をBluetooth HIDリモコンとして追加しますか？初期開発版では、デバイスが既にペアリング済みである必要があります。"
+        "description": "{name}をペアリングモードにしてHome Assistantへ直接接続したBluetoothアダプターの近くに置き、送信するとペアリングして追加します。Home Assistantが許可するのは、ここで選択したHIDリモコンだけです。"
+      },
+      "compatibility_repair": {
+        "description": "{name}のペアリングとボンド作成は成功していますが、この検証済みARモデルはBlueZが探索できない不正なGATTテーブルを返します。続行すると、このデバイス用の既知の非機密HIDキャッシュを適用し、ホストのBluetoothサービスを短時間再起動します。ボンド鍵は読み書きせず、このデバイスのGATTキャッシュだけを退避して置換します。"
+      },
+      "compatibility_wake": {
+        "description": "AR互換キャッシュを適用し、Bluetoothを再起動しました。{name}の任意のボタンを押して起動し、2秒待ってから送信してHIDサービスを確認してください。リモコンのリセットや再ペアリングは不要です。"
+      },
+      "replace_bond": {
+        "description": "BlueZには{name}の既存ボンドがありますが、利用可能なHIDサービスを取得できません。リモコンをリセットした後によく起きます。このリモコンをペアリングモードにしてから続行してください。Home Assistantは、ここで選択したデバイスのボンドだけを削除して作り直します。"
+      },
+      "service_pending": {
+        "description": "{name}のペアリングとボンド作成は成功しましたが、BlueZがHIDサービスをまだ公開していません。リモコンのボタンを押して起動してから、送信して再検証してください。完成したボンドは保持します。それでも取得できない場合は、次の確認画面でこのデバイスのボンドだけを置換できます。"
       },
       "user": {
         "data": {
           "address": "リモコン"
         },
-        "description": "表示されているBLE HID-over-GATTリモコンを選択してください。"
+        "description": "表示されているBLE HID-over-GATTリモコンを選択してください。初回ペアリングにはHome Assistant OSへ直接接続したBluetoothアダプターが必要です。"
+      }
+    }
+  },
+  "options": {
+    "error": {
+      "invalid_keymap": "カスタムキーマップが無効です。bluetooth_hid_remote_keymaps.yamlを確認して、この画面を開き直してください。",
+      "invalid_profile": "利用可能なキープロファイルを選択してください。"
+    },
+    "step": {
+      "init": {
+        "data": {
+          "key_profile": "キープロファイル"
+        },
+        "description": "イベントとセンサーで公開するキー名・数値コードの体系を選択します。カスタムプロファイルは/config/bluetooth_hid_remote_keymaps.yamlから読み込みます。",
+        "title": "キープロファイル"
       }
     }
   },
   "entity": {
+    "binary_sensor": {
+      "console_input_protection": {
+        "name": "コンソール入力保護"
+      }
+    },
     "event": {
       "remote_button": {
         "name": "リモコンボタン",
@@ -29,6 +78,14 @@
             }
           }
         }
+      }
+    },
+    "sensor": {
+      "last_key": {
+        "name": "最後のキー"
+      },
+      "last_key_code": {
+        "name": "最後のキーコード"
       }
     }
   }
