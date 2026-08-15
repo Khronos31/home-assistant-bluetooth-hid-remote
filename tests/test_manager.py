@@ -24,6 +24,7 @@ from custom_components.bluetooth_hid_remote.manager import (
     event_type_for_report,
     parse_report_reference,
 )
+from custom_components.bluetooth_hid_remote.voice import HidVoicePacket
 
 
 @pytest.mark.asyncio
@@ -72,6 +73,8 @@ def test_bluez_connection_only_updates_passive_state() -> None:
     manager._active_usages_by_path = {}
     manager._active_report_paths = {"path"}
     manager._notification_paths = {"path"}
+    manager._voice_listeners = set()
+    manager.last_voice_packet = None
     manager._stopping = False
 
     class Entry:
@@ -274,6 +277,69 @@ def test_unmapped_bluez_value_is_published_with_path_handle() -> None:
     path = "/org/bluez/hci0/dev_00_11_22_33_44_55/service0010/char0012"
     manager._async_bluez_value_changed(path, bytes.fromhex("510000"))
     assert received == [HidInputReport(0, 0x12, bytes.fromhex("510000"))]
+
+
+def test_descriptor_backed_opus_report_is_not_published_as_a_key() -> None:
+    """Voice payloads bypass the event entity and last-key sensor listeners."""
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    path = "/org/bluez/hci0/dev_x/service004f/char0065"
+    manager._report_metadata_by_path = {path: (0xF0, 0x65)}
+    manager._ignored_value_paths = set()
+    manager._initial_cached_values_by_path = {}
+    manager._report_decoder = HidReportDecoder.from_report_map(
+        bytes.fromhex("06ff000900a10185f095507508150025ff8100c0")
+    )
+    manager._active_usages_by_path = {}
+    manager._active_report_paths = set()
+    manager.last_report = None
+    manager.last_voice_packet = None
+    key_reports: list[HidInputReport] = []
+    voice_reports: list[HidVoicePacket | None] = []
+    manager._listeners = {key_reports.append}
+    manager._voice_listeners = {voice_reports.append}
+    packet = bytes.fromhex(
+        "b826965bd777c885ede76ed1cbf0a21ca1a70f985f4214c83a8a5e3879646572"
+        "7f2b41b7956304fdbec738919d791e442ad2607dc892efdc0277ee609142f8b37"
+        "5cb35cc2d284384cb272ed13fee3451"
+    )
+
+    manager._async_bluez_value_changed(path, packet)
+
+    assert key_reports == []
+    assert manager.last_report is None
+    assert voice_reports == [HidVoicePacket(0xF0, 0x65, packet)]
+
+
+def test_report_id_alone_cannot_hide_a_normal_key_report() -> None:
+    """An F0 report without the descriptor and Opus signature stays visible."""
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    path = "/org/bluez/hci0/dev_x/service004f/char0065"
+    manager._report_metadata_by_path = {path: (0xF0, 0x65)}
+    manager._ignored_value_paths = set()
+    manager._initial_cached_values_by_path = {}
+    manager._report_decoder = HidReportDecoder.from_report_map(
+        bytes.fromhex("06ff000900a10185f095037508150025ff8100c0")
+    )
+    manager._active_usages_by_path = {}
+    manager._active_report_paths = set()
+    manager.last_report = None
+    manager.last_voice_packet = None
+    key_reports: list[HidInputReport] = []
+    manager._listeners = {key_reports.append}
+    manager._voice_listeners = set()
+
+    manager._async_bluez_value_changed(path, bytes.fromhex("b80000"))
+
+    assert key_reports == [
+        HidInputReport(
+            0xF0,
+            0x65,
+            bytes.fromhex("b80000"),
+            (HidUsage(0xFF, 0xB8),),
+        )
+    ]
 
 
 def test_decoded_usage_is_carried_from_press_to_release() -> None:

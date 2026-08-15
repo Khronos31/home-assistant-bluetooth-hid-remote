@@ -47,21 +47,57 @@
     }
   },
   "options": {
+    "abort": {
+      "bond_rebuilt": "The Bluetooth bond was rebuilt and protected input handling was restored.",
+      "device_not_found": "The Bluetooth HID remote is no longer visible."
+    },
     "error": {
       "invalid_keymap": "The custom keymap file is invalid. Check bluetooth_hid_remote_keymaps.yaml and reload this form.",
-      "invalid_profile": "Select an available key profile."
+      "invalid_profile": "Select an available key profile.",
+      "device_not_found": "The remote is no longer visible on the directly attached Bluetooth adapter.",
+      "pairing_failed": "Bluetooth bond recovery failed. Put the remote back in pairing mode and try again.",
+      "pairing_rejected": "The remote or BlueZ rejected pairing. Put the remote back in pairing mode and try again.",
+      "pairing_timeout": "Bluetooth pairing timed out. Keep the remote close to the adapter and in pairing mode, then try again.",
+      "pairing_verification_failed": "BlueZ did not create a complete HID-over-GATT bond. Reset the remote's pairing and try again."
+    },
+    "progress": {
+      "rebuilding_bond": "Removing and rebuilding the Bluetooth bond for {name}. Keep this remote close and in pairing mode."
     },
     "step": {
       "init": {
+        "menu_options": {
+          "key_profile": "Key profile",
+          "voice": "Voice assistant",
+          "rebuild_bond": "Unpair and rebuild Bluetooth bond"
+        },
+        "title": "Bluetooth HID Remote settings"
+      },
+      "key_profile": {
         "data": {
           "key_profile": "Key profile"
         },
         "description": "Choose the numeric and naming namespace exposed by the event and sensor entities. Custom profiles are loaded from /config/bluetooth_hid_remote_keymaps.yaml.",
         "title": "Key profile"
+      },
+      "voice": {
+        "data": {
+          "voice_response_player": "Response media player"
+        },
+        "description": "Choose where Assist speaks its response. Leave empty to execute the intent without generating or playing TTS. The Assist pipeline itself is selected on the device's Pipeline entity.",
+        "title": "Voice assistant"
+      },
+      "rebuild_bond": {
+        "description": "This removes only the BlueZ bond for {name}, then pairs it again and restores Home Assistant's exclusive console-input protection. Put this remote in pairing mode before submitting. If protected setup cannot be restored, the new bond is removed again.",
+        "title": "Unpair and rebuild bond"
       }
     }
   },
   "entity": {
+    "assist_satellite": {
+      "assist": {
+        "name": "Assist"
+      }
+    },
     "binary_sensor": {
       "console_input_protection": {
         "name": "Console input protection"
@@ -86,6 +122,14 @@
       },
       "last_key_code": {
         "name": "Last key code"
+      }
+    },
+    "select": {
+      "pipeline": {
+        "name": "Assist pipeline",
+        "state": {
+          "preferred": "Preferred"
+        }
       }
     }
   }

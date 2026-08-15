@@ -337,6 +337,109 @@ async def _async_wait_for_direct_device(
     return device_path
 
 
+async def async_remove_hogp_device(
+    address: str,
+    *,
+    manager: BlueZManager | None = None,
+    bus_factory: BusFactory = _async_open_system_bus,
+    ignore_missing: bool = False,
+) -> bool:
+    """Remove exactly one direct-adapter Bluetooth device from BlueZ."""
+    if manager is None:
+        manager = await get_global_bluez_manager()
+
+    device_path = bluez_device_path_from_address(manager, address)
+    if device_path is None:
+        if ignore_missing:
+            return False
+        raise PairingDeviceNotFoundError(
+            "The selected remote is no longer visible on the direct adapter"
+        )
+
+    properties = _device_properties(manager, device_path)
+    adapter_path = properties.get("Adapter")
+    if not isinstance(adapter_path, str):
+        raise PairingVerificationError("BlueZ did not report the owning adapter")
+
+    try:
+        bus = await bus_factory()
+    except Exception as err:
+        raise PairingError("Could not open the BlueZ system bus") from err
+    try:
+        try:
+            await _async_remove_device(bus, adapter_path, device_path)
+        except BleakDBusError as err:
+            raise PairingError(
+                f"BlueZ could not remove the selected remote: {err}"
+            ) from err
+    finally:
+        bus.disconnect()
+    return True
+
+
+async def async_rebuild_hogp_bond(
+    address: str,
+    *,
+    manager: BlueZManager | None = None,
+    bus_factory: BusFactory = _async_open_system_bus,
+    timeout: float = PAIRING_TIMEOUT,
+) -> PairingResult:
+    """Remove, rediscover, pair, and verify one selected HOGP remote."""
+    if manager is None:
+        manager = await get_global_bluez_manager()
+
+    device_path = bluez_device_path_from_address(manager, address)
+    if device_path is None:
+        raise PairingDeviceNotFoundError(
+            "The selected remote is no longer visible on the direct adapter"
+        )
+
+    properties = _device_properties(manager, device_path)
+    adapter_path = properties.get("Adapter")
+    if not isinstance(adapter_path, str):
+        raise PairingVerificationError("BlueZ did not report the owning adapter")
+
+    try:
+        bus = await bus_factory()
+    except Exception as err:
+        raise PairingError("Could not open the BlueZ system bus") from err
+    discovery_started = False
+    try:
+        try:
+            await _async_start_discovery(bus, adapter_path)
+        except BleakDBusError as err:
+            raise PairingError(
+                f"BlueZ could not start discovery before rebuilding the bond: {err}"
+            ) from err
+        discovery_started = True
+
+        try:
+            await _async_remove_device(bus, adapter_path, device_path)
+        except BleakDBusError as err:
+            raise PairingError(
+                f"BlueZ could not remove the selected bond: {err}"
+            ) from err
+
+        try:
+            await _async_wait_for_direct_device(manager, address, timeout)
+        except TimeoutError as err:
+            raise PairingTimeoutError(
+                "The remote was not rediscovered after removing its bond"
+            ) from err
+    finally:
+        if discovery_started:
+            with suppress(Exception):
+                await _async_stop_discovery(bus, adapter_path)
+        bus.disconnect()
+
+    return await async_pair_hogp_device(
+        address,
+        manager=manager,
+        bus_factory=bus_factory,
+        timeout=timeout,
+    )
+
+
 async def async_pair_hogp_device(
     address: str,
     *,
@@ -386,46 +489,7 @@ async def async_pair_hogp_device(
             replacement_error = err
 
         if replacement_error is not None:
-            adapter_path = initial_properties.get("Adapter")
-            if not isinstance(adapter_path, str):
-                raise PairingVerificationError(
-                    "BlueZ did not report the owning adapter"
-                ) from replacement_error
-            try:
-                bus = await bus_factory()
-            except Exception as bus_err:
-                raise PairingError("Could not open the BlueZ system bus") from bus_err
-            discovery_started = False
-            try:
-                try:
-                    await _async_start_discovery(bus, adapter_path)
-                except BleakDBusError as discovery_err:
-                    raise PairingError(
-                        "BlueZ could not start discovery before replacing the bond: "
-                        f"{discovery_err}"
-                    ) from discovery_err
-                discovery_started = True
-
-                try:
-                    await _async_remove_device(bus, adapter_path, device_path)
-                except BleakDBusError as remove_err:
-                    raise PairingError(
-                        f"BlueZ could not remove the unusable bond: {remove_err}"
-                    ) from remove_err
-
-                try:
-                    await _async_wait_for_direct_device(manager, address, timeout)
-                except TimeoutError as wait_err:
-                    raise PairingTimeoutError(
-                        "The reset remote was not rediscovered after removing its old "
-                        "bond"
-                    ) from wait_err
-            finally:
-                if discovery_started:
-                    with suppress(Exception):
-                        await _async_stop_discovery(bus, adapter_path)
-                bus.disconnect()
-            return await async_pair_hogp_device(
+            return await async_rebuild_hogp_bond(
                 address,
                 manager=manager,
                 bus_factory=bus_factory,

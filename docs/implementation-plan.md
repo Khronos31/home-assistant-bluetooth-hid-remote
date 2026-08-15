@@ -277,6 +277,124 @@ Passing one cell never implies support for another.
   must not block a later config-flow pairing or reconnect to the HAOS console
   without input protection.
 
+#### Bond removal and recovery contract
+
+- Provide a confirmed **Unpair / rebuild bond** action from the integration's
+  configuration flow. It must be the supported equivalent of
+  `bluetoothctl remove <address>` and operate only on the address belonging to
+  that config entry.
+- Do not expose destructive bond removal as a normal `button` entity: Home
+  Assistant button entities provide no integration-owned confirmation step,
+  and leaving the config entry loaded after an accidental press creates an
+  ambiguous disconnected state.
+- Before removing a bond, stop the active Assist run, discard bounded audio
+  buffers, release notification subscriptions and exclusive input grabs, then
+  ask BlueZ to remove exactly the selected device. Never restart Bluetooth or
+  remove unrelated bonds.
+- After explicit removal, continue directly into the existing pairing flow so
+  the user can rebuild the bond without opening a host console. A failed or
+  cancelled re-pair must remain recoverable by reopening the same flow.
+- Config-entry deletion must also remove that entry's BlueZ bond after an
+  explicit confirmation in the UI. If Home Assistant's entry-removal lifecycle
+  cannot present that confirmation reliably, retain the dedicated unpair flow
+  as a required pre-delete action and surface a repair explaining it; do not
+  silently leave a console-active orphaned HID bond.
+
+#### Assist configuration contract
+
+- Create one `assist_satellite` entity for each voice-capable remote. Voice
+  support belongs to that remote's existing Home Assistant device; it is not a
+  global integration-wide microphone.
+- Create a per-remote `select` entity containing the Assist pipelines currently
+  configured in Home Assistant. Expose that entity through the satellite's
+  `pipeline_entity_id`, so the user selects the assistant by its displayed
+  pipeline name rather than entering or copying an internal pipeline ID.
+- Read and update pipeline choices through Home Assistant's supported Assist
+  APIs. Do not read or modify `.storage` and do not hard-code the preferred
+  pipeline.
+- Start at the STT stage because the physical voice button is the activation
+  mechanism; no wake-word pass is needed. The button press starts one run and
+  release closes its audio input.
+- Offer a per-remote response policy. The minimum choices are no spoken
+  response (run through intent handling) and TTS playback on a selected
+  `media_player`. A remote without a speaker must never leave a satellite in a
+  responding state waiting for playback that cannot finish.
+- Pipeline selection and response routing are independent. Different remotes
+  may use different Assist pipelines and different response players.
+
+#### AR voice-transport evidence (2026-08-15)
+
+- The tested `AR` sends Consumer Control `AC Search` in Report ID `0x02` when
+  its voice button is pressed and sends the all-zero release report when the
+  button is released.
+- While held, input Report ID `0xF0` on observed characteristic handle 101
+  carries one 80-byte Opus packet per notification. Handle numbers are runtime
+  observations and must not be used as a protocol identifier.
+- Every captured audio packet began with Opus TOC byte `0xB8`: configuration
+  23, CELT-only wideband, mono, one 20 ms frame. Wrapping 94 captured packets
+  in Ogg Opus decoded without an ffmpeg codec error to 1.88 seconds of audible
+  16 kHz mono PCM.
+- Notification timing contained gaps from roughly 40 ms through 518 ms. The
+  current evidence does not distinguish remote-side discontinuous/lost
+  transmission from loss in the diagnostic entity/WebSocket path. Production
+  voice handling must consume the manager's raw notification callback, bound
+  queues, and apply an explicit packet-loss policy rather than using event
+  entity state as an audio transport.
+- This proves that the integration can recover microphone audio from the `AR`.
+  It does not promote `AR` to the v0.2.0 compatibility target; framing,
+  transport stability, and start/stop behavior must be repeated with the
+  genuine Fire TV remote.
+
+#### Implemented pre-hardware slice (unreleased, 2026-08-15)
+
+- `async_remove_hogp_device` removes one exact BlueZ device path. The options
+  flow unloads the entry, rebuilds only that bond, and restores protected input
+  handling. If entry setup fails after pairing, it removes the new bond again.
+  Config-entry deletion also removes only its own bond.
+- Report ID `0xF0` is classified as voice only when the parsed HID descriptor
+  declares an 80-byte input payload and the packet carries the observed mono
+  20 ms Opus TOC (`0xB8`). A report ID alone never suppresses a key event.
+- Valid voice packets bypass the event entity, Last key sensors, and Recorder.
+  Capture is limited to 750 packets / 15 seconds and is closed on key release,
+  disconnect, or unload.
+- Captured Opus is wrapped in memory as Ogg, decoded by Home Assistant's ffmpeg
+  binary to 16 kHz, signed 16-bit, mono PCM, then sent to Assist at the STT
+  stage. No raw recording is persisted by the integration.
+- Voice-capable remotes gain one Assist satellite and one pipeline selector on
+  the existing device. With no response player configured, the run ends at
+  intent handling; with a player configured, TTS is sent to that player and
+  the satellite is explicitly returned to idle.
+- This is implementation evidence only. Release, version changes, tags, and
+  compatibility claims remain blocked until genuine Fire TV hardware testing.
+
+#### Genuine Google TV Remote protocol research (2026-08-15)
+
+- The household's genuine `Google TV Remote` is bonded at
+  `C4:19:D1:5E:6C:C3`. Its voice button produces an immediate HID Search
+  press/release rather than holding the key for the duration of speech. It
+  therefore cannot use the AR's release-delimited HOGP transport unchanged.
+- Google's open [Android TV remote reference firmware][google-atvv-gatt]
+  defines a separate ATVV
+  service `ab5e0001-5a21-4f05-bc7d-af01f617b664`, with host command TX
+  (`...0002...`), remote audio RX (`...0003...`), and remote control
+  (`...0004...`) characteristics. Handles are intentionally not part of the
+  contract.
+- The published [ATVV control definitions][google-atvv-control] support
+  capability negotiation (`0x0A`),
+  microphone open (`0x0C`), close (`0x0D`), and timeout extension (`0x0E`).
+  Remote control notifications distinguish Search (`0x08`), Audio Start
+  (`0x04`), Audio Stop (`0x00`), and synchronization messages.
+- Version 1.0 advertises 8/16 kHz ADPCM and interaction modes including
+  on-request, press-to-talk, and hold-to-talk. This is materially different
+  from AR's 80-byte Opus-over-HOGP reports.
+- The next non-destructive hardware probe is to enumerate these three UUIDs on
+  the bonded genuine remote and capture only control opcode/length metadata
+  while pressing its voice button. Audio decoding and v0.3.0 implementation
+  remain separate from the Fire/AR path.
+
+[google-atvv-gatt]: https://android.googlesource.com/platform/hardware/telink/atv/refDesignRcu/+/refs/heads/master/vendor/827x_ble_remote/app_att.c
+[google-atvv-control]: https://android.googlesource.com/platform/hardware/telink/atv/refDesignRcu/+/86f501098fb4ba60954cb046201ffe43ca360c3e/application/audio/gl_audio.h
+
 ### v0.3.0: Google TV Voice Remote support
 
 - Add Assist input for a genuine Google TV Voice Remote after documenting its

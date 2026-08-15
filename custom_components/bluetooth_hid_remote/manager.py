@@ -38,8 +38,16 @@ from .const import (
 from .hid import HidReportDecoder, HidUsage
 from .input_grab import BluetoothInputGrabber, InputGrabStatus
 from .keymap import KeyMapper
+from .voice import (
+    VOICE_PACKET_SIZE,
+    VOICE_REPORT_ID,
+    HidVoicePacket,
+    is_supported_opus_packet,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+type VoiceListener = Callable[[HidVoicePacket | None], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +114,7 @@ class BluetoothHidRemoteManager:
         self.input_report_count = 0
         self.report_map: bytes | None = None
         self.last_report: HidInputReport | None = None
+        self.last_voice_packet: HidVoicePacket | None = None
         self.connection_failures = 0
         self.input_grabber = BluetoothInputGrabber(
             self.address,
@@ -115,6 +124,7 @@ class BluetoothHidRemoteManager:
         )
 
         self._listeners: set[Callable[[HidInputReport], None]] = set()
+        self._voice_listeners: set[VoiceListener] = set()
         self._unsub_bluetooth: CALLBACK_TYPE | None = None
         self._bluez_manager: BlueZManager | None = None
         self._bluez_watcher: DeviceWatcher | None = None
@@ -159,6 +169,7 @@ class BluetoothHidRemoteManager:
             self._bluez_manager = None
             self._device_path = None
             self.connected = False
+            self._publish_voice_packet(None)
             self._active_usages_by_path.clear()
             self._active_report_paths.clear()
             self._ignored_value_paths.clear()
@@ -210,11 +221,9 @@ class BluetoothHidRemoteManager:
             self.connected,
         )
         if self.connected:
-            self.entry.async_create_background_task(
-                self.hass,
-                self._async_map_report_characteristics(),
-                name=f"Bluetooth HID metadata {self.address}",
-            )
+            # Initial platform setup needs descriptor metadata so voice-only
+            # reports never briefly surface as ordinary key events.
+            await self._async_map_report_characteristics()
 
     def async_add_listener(
         self, listener: Callable[[HidInputReport], None]
@@ -222,6 +231,20 @@ class BluetoothHidRemoteManager:
         """Subscribe an entity to input reports."""
         self._listeners.add(listener)
         return lambda: self._listeners.discard(listener)
+
+    def async_add_voice_listener(self, listener: VoiceListener) -> CALLBACK_TYPE:
+        """Subscribe to validated Opus packets and stream termination."""
+        self._voice_listeners.add(listener)
+        return lambda: self._voice_listeners.discard(listener)
+
+    @property
+    def supports_voice(self) -> bool:
+        """Return whether the HID descriptor declares the known voice report."""
+        return bool(
+            self._report_decoder is not None
+            and self._report_decoder.input_report_size_bytes(VOICE_REPORT_ID)
+            == VOICE_PACKET_SIZE
+        )
 
     @callback
     def _async_bluetooth_update(self, *_: Any) -> None:
@@ -247,6 +270,7 @@ class BluetoothHidRemoteManager:
             self._active_report_paths.clear()
             self._notification_paths.clear()
             self.input_report_count = 0
+            self._publish_voice_packet(None)
             return
         if self._stopping:
             return
@@ -528,6 +552,15 @@ class BluetoothHidRemoteManager:
                 value.hex(),
             )
         report_id, characteristic_handle = metadata
+        if (
+            report_id == VOICE_REPORT_ID
+            and self.supports_voice
+            and is_supported_opus_packet(value)
+        ):
+            self._publish_voice_packet(
+                HidVoicePacket(report_id, characteristic_handle, bytes(value))
+            )
+            return
         if any(value):
             self._active_report_paths.add(path)
         elif path not in self._active_report_paths:
@@ -568,3 +601,18 @@ class BluetoothHidRemoteManager:
         )
         for listener in tuple(self._listeners):
             listener(report)
+
+    @callback
+    def _publish_voice_packet(self, packet: HidVoicePacket | None) -> None:
+        """Publish voice outside the key-event and last-key pipelines."""
+        self.last_voice_packet = packet
+        if packet is not None:
+            _LOGGER.debug(
+                "HID voice address=%s report_id=%d handle=%d bytes=%d",
+                self.address,
+                packet.report_id,
+                packet.characteristic_handle,
+                len(packet.data),
+            )
+        for listener in tuple(self._voice_listeners):
+            listener(packet)

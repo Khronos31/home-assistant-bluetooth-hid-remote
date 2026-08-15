@@ -16,6 +16,7 @@ from homeassistant.config_entries import (
     OptionsFlow,
 )
 from homeassistant.core import callback
+from homeassistant.helpers import selector
 
 from .compatibility import (
     CompatibilityRepairError,
@@ -27,6 +28,7 @@ from .const import (
     CONF_ADDRESS,
     CONF_KEY_PROFILE,
     CONF_NAME,
+    CONF_VOICE_RESPONSE_PLAYER,
     DOMAIN,
     HID_SERVICE_UUID,
     KEY_PROFILE_ANDROID_TV,
@@ -43,6 +45,8 @@ from .pairing import (
     PairingTimeoutError,
     PairingVerificationError,
     async_pair_hogp_device,
+    async_rebuild_hogp_bond,
+    async_remove_hogp_device,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -373,9 +377,22 @@ class BluetoothHidRemoteConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class BluetoothHidRemoteOptionsFlow(OptionsFlow):
-    """Select a built-in or custom key profile."""
+    """Configure key mapping and confirmed bond recovery."""
+
+    def __init__(self) -> None:
+        """Initialize an options flow without touching its config entry yet."""
+        self._bond_task: asyncio.Task[Any] | None = None
+        self._bond_error: Exception | None = None
 
     async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Choose a safe configuration or recovery operation."""
+        return self.async_show_menu(
+            step_id="init", menu_options=["key_profile", "voice", "rebuild_bond"]
+        )
+
+    async def async_step_key_profile(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Configure the key mapping profile."""
@@ -404,12 +421,136 @@ class BluetoothHidRemoteOptionsFlow(OptionsFlow):
             if profile not in available_profiles:
                 errors["base"] = "invalid_profile"
             else:
-                return self.async_create_entry(data={CONF_KEY_PROFILE: profile})
+                return self.async_create_entry(
+                    data={**self.config_entry.options, CONF_KEY_PROFILE: profile}
+                )
 
         return self.async_show_form(
-            step_id="init",
+            step_id="key_profile",
             data_schema=vol.Schema(
                 {vol.Required(CONF_KEY_PROFILE, default=current): vol.In(labels)}
             ),
             errors=errors,
         )
+
+    async def async_step_voice(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Configure optional TTS response playback for remote Assist."""
+        current = self.config_entry.options.get(CONF_VOICE_RESPONSE_PLAYER, "")
+        if user_input is not None:
+            options = dict(self.config_entry.options)
+            response_player = user_input.get(CONF_VOICE_RESPONSE_PLAYER)
+            if response_player:
+                options[CONF_VOICE_RESPONSE_PLAYER] = response_player
+            else:
+                options.pop(CONF_VOICE_RESPONSE_PLAYER, None)
+            return self.async_create_entry(data=options)
+
+        response_field = vol.Optional(CONF_VOICE_RESPONSE_PLAYER)
+        if current:
+            response_field = vol.Optional(CONF_VOICE_RESPONSE_PLAYER, default=current)
+        return self.async_show_form(
+            step_id="voice",
+            data_schema=vol.Schema(
+                {
+                    response_field: selector.EntitySelector(
+                        selector.EntitySelectorConfig(domain="media_player")
+                    )
+                }
+            ),
+        )
+
+    async def async_step_rebuild_bond(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Confirm removal and recreation of only this entry's BlueZ bond."""
+        if user_input is not None:
+            if self._bond_task is None:
+                self._bond_error = None
+                self._bond_task = self.hass.async_create_task(
+                    self._async_rebuild_entry_bond(),
+                    name=(
+                        "Rebuild Bluetooth HID bond "
+                        f"{self.config_entry.data[CONF_ADDRESS]}"
+                    ),
+                    eager_start=False,
+                )
+            return await self.async_step_rebuild_progress()
+
+        return self.async_show_form(
+            step_id="rebuild_bond",
+            description_placeholders={
+                "name": self.config_entry.data.get(CONF_NAME, "BLE HID Remote")
+            },
+        )
+
+    async def async_step_rebuild_progress(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show progress while the selected bond is rebuilt."""
+        task = self._bond_task
+        if task is None:
+            return self.async_abort(reason="device_not_found")
+        if not task.done():
+            return self.async_show_progress(
+                step_id="rebuild_progress",
+                progress_action="rebuilding_bond",
+                description_placeholders={
+                    "name": self.config_entry.data.get(CONF_NAME, "BLE HID Remote")
+                },
+                progress_task=task,
+            )
+
+        try:
+            task.result()
+        except Exception as err:  # rendered on the confirmed recovery form
+            self._bond_error = err
+        finally:
+            self._bond_task = None
+        return self.async_show_progress_done(next_step_id="rebuild_result")
+
+    async def async_step_rebuild_result(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Finish or return a recoverable bond-rebuild error."""
+        error = self._bond_error
+        self._bond_error = None
+        if error is None:
+            return self.async_abort(reason="bond_rebuilt")
+
+        _LOGGER.warning("Bluetooth HID bond rebuild failed: %s", error)
+        return self.async_show_form(
+            step_id="rebuild_bond",
+            description_placeholders={
+                "name": self.config_entry.data.get(CONF_NAME, "BLE HID Remote")
+            },
+            errors={"base": BluetoothHidRemoteConfigFlow._pairing_error_key(error)},
+        )
+
+    async def _async_rebuild_entry_bond(self) -> None:
+        """Fail closed while replacing one loaded entry's bond."""
+        entry = self.config_entry
+        address = entry.data[CONF_ADDRESS]
+        if not await self.hass.config_entries.async_unload(entry.entry_id):
+            raise PairingError(
+                "Home Assistant could not unload the remote before bond removal"
+            )
+
+        rebuilt = False
+        try:
+            await async_rebuild_hogp_bond(address)
+            rebuilt = True
+            if not await self.hass.config_entries.async_setup(entry.entry_id):
+                raise PairingError(
+                    "Home Assistant could not restore protected remote input"
+                )
+        except Exception:
+            if rebuilt:
+                try:
+                    await async_remove_hogp_device(address, ignore_missing=True)
+                except PairingError:
+                    _LOGGER.exception(
+                        "Could not remove newly rebuilt bond after setup failure"
+                    )
+            raise

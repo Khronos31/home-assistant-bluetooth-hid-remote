@@ -47,21 +47,57 @@
     }
   },
   "options": {
+    "abort": {
+      "bond_rebuilt": "Bluetoothボンドを再作成し、コンソール入力保護を復元しました。",
+      "device_not_found": "Bluetooth HIDリモコンが見つからなくなりました。"
+    },
     "error": {
       "invalid_keymap": "カスタムキーマップが無効です。bluetooth_hid_remote_keymaps.yamlを確認して、この画面を開き直してください。",
-      "invalid_profile": "利用可能なキープロファイルを選択してください。"
+      "invalid_profile": "利用可能なキープロファイルを選択してください。",
+      "device_not_found": "Home Assistantへ直接接続したBluetoothアダプターからリモコンが見えなくなりました。",
+      "pairing_failed": "Bluetoothボンドの再作成に失敗しました。リモコンをペアリングモードに戻して再試行してください。",
+      "pairing_rejected": "リモコンまたはBlueZがペアリングを拒否しました。リモコンをもう一度ペアリングモードにして再試行してください。",
+      "pairing_timeout": "Bluetoothペアリングが時間切れになりました。リモコンをアダプターへ近づけ、ペアリングモードのまま再試行してください。",
+      "pairing_verification_failed": "BlueZで完全なHID-over-GATTボンドを確認できませんでした。リモコンのペアリングをリセットして再試行してください。"
+    },
+    "progress": {
+      "rebuilding_bond": "{name}のBluetoothボンドを削除して再作成しています。このリモコンを近くに置き、ペアリングモードを維持してください。"
     },
     "step": {
       "init": {
+        "menu_options": {
+          "key_profile": "キープロファイル",
+          "voice": "音声アシスタント",
+          "rebuild_bond": "ペアリング解除とBluetoothボンド再作成"
+        },
+        "title": "Bluetooth HID Remoteの設定"
+      },
+      "key_profile": {
         "data": {
           "key_profile": "キープロファイル"
         },
         "description": "イベントとセンサーで公開するキー名・数値コードの体系を選択します。カスタムプロファイルは/config/bluetooth_hid_remote_keymaps.yamlから読み込みます。",
         "title": "キープロファイル"
+      },
+      "voice": {
+        "data": {
+          "voice_response_player": "応答を再生するメディアプレーヤー"
+        },
+        "description": "Assistの応答を再生する場所を選びます。空欄の場合はTTSを生成・再生せず、意図の実行までで終了します。Assistパイプラインは、このデバイスの「Assistパイプライン」エンティティで選択します。",
+        "title": "音声アシスタント"
+      },
+      "rebuild_bond": {
+        "description": "{name}だけをBlueZから削除し、再ペアリングしてHome Assistantのコンソール入力保護を復元します。送信前にこのリモコンをペアリングモードにしてください。入力保護を復元できない場合、新しいボンドも再び削除します。",
+        "title": "ペアリング解除とボンド再作成"
       }
     }
   },
   "entity": {
+    "assist_satellite": {
+      "assist": {
+        "name": "Assist"
+      }
+    },
     "binary_sensor": {
       "console_input_protection": {
         "name": "コンソール入力保護"
@@ -86,6 +122,14 @@
       },
       "last_key_code": {
         "name": "最後のキーコード"
+      }
+    },
+    "select": {
+      "pipeline": {
+        "name": "Assistパイプライン",
+        "state": {
+          "preferred": "優先"
+        }
       }
     }
   }

@@ -8,6 +8,7 @@ import pytest
 
 from custom_components.bluetooth_hid_remote import (
     async_migrate_entry,
+    async_remove_entry,
     async_setup_entry,
 )
 from custom_components.bluetooth_hid_remote.compatibility import (
@@ -15,11 +16,13 @@ from custom_components.bluetooth_hid_remote.compatibility import (
 )
 from custom_components.bluetooth_hid_remote.config_flow import (
     BluetoothHidRemoteConfigFlow,
+    BluetoothHidRemoteOptionsFlow,
 )
 from custom_components.bluetooth_hid_remote.const import (
     CONF_ADDRESS,
     CONF_KEY_PROFILE,
     CONF_NAME,
+    CONF_VOICE_RESPONSE_PLAYER,
     KEY_PROFILE_ANDROID_TV,
     KEY_PROFILE_HID,
 )
@@ -40,6 +43,29 @@ def _new_pairing_flow() -> BluetoothHidRemoteConfigFlow:
     flow._async_supports_compatibility_repair = AsyncMock(return_value=False)
     flow.context = {"title_placeholders": {"name": "Remote"}}
     return flow
+
+
+def _new_options_flow() -> tuple[BluetoothHidRemoteOptionsFlow, SimpleNamespace]:
+    """Create an options flow with one known config entry."""
+    entry = SimpleNamespace(
+        entry_id="entry-id",
+        domain="bluetooth_hid_remote",
+        data={CONF_ADDRESS: "00:11:22:33:44:55", CONF_NAME: "Remote"},
+        options={CONF_KEY_PROFILE: KEY_PROFILE_HID},
+    )
+    config_entries = SimpleNamespace(
+        async_get_known_entry=lambda _entry_id: entry,
+        async_unload=AsyncMock(return_value=True),
+        async_setup=AsyncMock(return_value=True),
+    )
+    flow = BluetoothHidRemoteOptionsFlow()
+    flow.hass = SimpleNamespace(
+        config_entries=config_entries,
+        async_create_task=lambda target, **kwargs: asyncio.create_task(target),
+    )
+    flow.handler = entry.entry_id
+    flow.context = {}
+    return flow, entry
 
 
 async def _finish_pairing_progress(
@@ -89,6 +115,113 @@ async def test_setup_acquires_input_before_forwarding_entities(
     assert await async_setup_entry(hass, entry) is True
     assert operations == ["start", "forward"]
     assert entry.runtime_data is manager
+
+
+@pytest.mark.asyncio
+async def test_options_menu_separates_configuration_from_bond_recovery() -> None:
+    """A destructive recovery action is not rendered as an entity button."""
+    flow, _entry = _new_options_flow()
+
+    result = await flow.async_step_init()
+
+    assert result["type"] == "menu"
+    assert result["menu_options"] == ["key_profile", "voice", "rebuild_bond"]
+
+
+@pytest.mark.asyncio
+async def test_voice_response_option_preserves_key_profile() -> None:
+    """Voice settings and key mapping can be changed independently."""
+    flow, _entry = _new_options_flow()
+    flow.async_create_entry = lambda **kwargs: kwargs
+
+    result = await flow.async_step_voice(
+        {CONF_VOICE_RESPONSE_PLAYER: "media_player.study"}
+    )
+
+    assert result["data"] == {
+        CONF_KEY_PROFILE: KEY_PROFILE_HID,
+        CONF_VOICE_RESPONSE_PLAYER: "media_player.study",
+    }
+
+
+@pytest.mark.asyncio
+async def test_confirmed_bond_rebuild_unloads_pairs_and_restores_protection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovery restores the entry only after the selected bond is verified."""
+    operations: list[str] = []
+    flow, entry = _new_options_flow()
+    flow.hass.config_entries.async_unload.side_effect = lambda _entry_id: (
+        operations.append("unload") or True
+    )
+    flow.hass.config_entries.async_setup.side_effect = lambda _entry_id: (
+        operations.append("setup") or True
+    )
+
+    async def rebuild(_address: str) -> None:
+        operations.append("rebuild")
+
+    monkeypatch.setattr(
+        "custom_components.bluetooth_hid_remote.config_flow.async_rebuild_hogp_bond",
+        rebuild,
+    )
+
+    progress = await flow.async_step_rebuild_bond({})
+    assert progress["type"] == "progress"
+    await asyncio.sleep(0)
+    progress_done = await flow.async_step_rebuild_progress()
+    assert progress_done["type"] == "progress_done"
+    result = await flow.async_step_rebuild_result()
+
+    assert result["type"] == "abort"
+    assert result["reason"] == "bond_rebuilt"
+    assert operations == ["unload", "rebuild", "setup"]
+    flow.hass.config_entries.async_unload.assert_awaited_once_with(entry.entry_id)
+
+
+@pytest.mark.asyncio
+async def test_failed_protected_setup_removes_the_new_bond(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A paired remote never remains console-active after setup failure."""
+    flow, _entry = _new_options_flow()
+    flow.hass.config_entries.async_setup.return_value = False
+    rebuild = AsyncMock()
+    remove = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "custom_components.bluetooth_hid_remote.config_flow.async_rebuild_hogp_bond",
+        rebuild,
+    )
+    monkeypatch.setattr(
+        "custom_components.bluetooth_hid_remote.config_flow.async_remove_hogp_device",
+        remove,
+    )
+
+    await flow.async_step_rebuild_bond({})
+    await asyncio.sleep(0)
+    await flow.async_step_rebuild_progress()
+    result = await flow.async_step_rebuild_result()
+
+    assert result["type"] == "form"
+    assert result["errors"] == {"base": "pairing_failed"}
+    rebuild.assert_awaited_once_with("00:11:22:33:44:55")
+    remove.assert_awaited_once_with("00:11:22:33:44:55", ignore_missing=True)
+
+
+@pytest.mark.asyncio
+async def test_entry_deletion_removes_only_its_bond(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deleting an entry does not leave a HID bond connected to the console."""
+    remove = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "custom_components.bluetooth_hid_remote.async_remove_hogp_device", remove
+    )
+    entry = SimpleNamespace(data={CONF_ADDRESS: "00:11:22:33:44:55"})
+
+    await async_remove_entry(SimpleNamespace(), entry)
+
+    remove.assert_awaited_once_with("00:11:22:33:44:55", ignore_missing=True)
 
 
 @pytest.mark.asyncio

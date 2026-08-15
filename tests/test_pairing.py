@@ -20,6 +20,8 @@ from custom_components.bluetooth_hid_remote.pairing import (
     PairingStaleBondError,
     PairingTimeoutError,
     async_pair_hogp_device,
+    async_rebuild_hogp_bond,
+    async_remove_hogp_device,
 )
 
 ADDRESS = "88:34:37:C9:CA:71"
@@ -340,6 +342,72 @@ async def test_explicit_replacement_removes_only_stale_target_then_repairs() -> 
         manager=manager,
         bus_factory=bus_factory,
         replace_existing=True,
+    )
+
+    assert result.already_paired is False
+    assert [call.member for call in remove_bus.calls] == [
+        "StartDiscovery",
+        "RemoveDevice",
+        "StopDiscovery",
+    ]
+    assert [call.member for call in pair_bus.calls] == [
+        "StartDiscovery",
+        "RegisterAgent",
+        "RequestDefaultAgent",
+        "Pair",
+        "Set",
+        "UnregisterAgent",
+        "StopDiscovery",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_explicit_remove_targets_only_selected_direct_device() -> None:
+    """The public unpair helper is an idempotent, address-scoped operation."""
+    manager = _manager(paired=True)
+    bus = FakeBus(manager)
+
+    assert (
+        await async_remove_hogp_device(
+            ADDRESS, manager=manager, bus_factory=AsyncMock(return_value=bus)
+        )
+        is True
+    )
+
+    assert [call.member for call in bus.calls] == ["RemoveDevice"]
+    assert bus.calls[0].path == ADAPTER_PATH
+    assert bus.calls[0].body == [DEVICE_PATH]
+    assert bus.disconnected is True
+
+
+@pytest.mark.asyncio
+async def test_remove_can_ignore_an_already_absent_target() -> None:
+    """Config-entry cleanup may safely repeat after BlueZ forgot the device."""
+    manager = SimpleNamespace(_properties={})
+    bus_factory = AsyncMock()
+
+    assert (
+        await async_remove_hogp_device(
+            ADDRESS,
+            manager=manager,
+            bus_factory=bus_factory,
+            ignore_missing=True,
+        )
+        is False
+    )
+    bus_factory.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_rebuild_replaces_even_a_valid_bond() -> None:
+    """Recovery explicitly removes a valid bond before pairing it again."""
+    manager = _manager(paired=True)
+    remove_bus = FakeBus(manager)
+    pair_bus = FakeBus(manager)
+    bus_factory = AsyncMock(side_effect=[remove_bus, pair_bus])
+
+    result = await async_rebuild_hogp_bond(
+        ADDRESS, manager=manager, bus_factory=bus_factory
     )
 
     assert result.already_paired is False

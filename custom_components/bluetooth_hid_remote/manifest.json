@@ -15,8 +15,11 @@
   ],
   "config_flow": true,
   "dependencies": [
+    "assist_pipeline",
+    "assist_satellite",
     "bluetooth",
-    "bluetooth_adapters"
+    "bluetooth_adapters",
+    "ffmpeg"
   ],
   "documentation": "https://github.com/Khronos31/home-assistant-bluetooth-hid-remote",
   "integration_type": "device",

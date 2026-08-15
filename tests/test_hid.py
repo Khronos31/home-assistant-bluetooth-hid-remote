@@ -49,6 +49,15 @@ def test_ar_consumer_report_decodes_volume_increment() -> None:
     )
 
 
+def test_ar_voice_report_declares_eighty_byte_payload() -> None:
+    """Voice detection can be anchored in the remote's HID descriptor."""
+    decoder = HidReportDecoder.from_report_map(AR_REPORT_MAP)
+
+    assert decoder.input_report_size_bytes(0xF0) == 80
+    assert decoder.input_report_size_bytes(0xF1) == 3
+    assert decoder.input_report_size_bytes(0x7F) is None
+
+
 def test_less_common_usage_keeps_numeric_identity_and_gets_a_name() -> None:
     """The comprehensive table names usages outside a hand-curated subset."""
     decoder = HidReportDecoder.from_report_map(AR_REPORT_MAP)

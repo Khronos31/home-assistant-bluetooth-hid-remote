@@ -43,15 +43,19 @@ class HidReportDescriptorError(ValueError):
 class HidReportDecoder:
     """Decode active usages from input reports described by a Report Map."""
 
-    def __init__(self, fields: tuple[HidInputField, ...]) -> None:
+    def __init__(
+        self, fields: tuple[HidInputField, ...], report_bits: dict[int, int]
+    ) -> None:
         self._fields_by_report_id: dict[int, list[HidInputField]] = {}
         for field in fields:
             self._fields_by_report_id.setdefault(field.report_id, []).append(field)
+        self._report_bits = report_bits
 
     @classmethod
     def from_report_map(cls, report_map: bytes) -> HidReportDecoder:
         """Parse the Input items needed for usage decoding."""
-        return cls(_parse_input_fields(report_map))
+        fields, report_bits = _parse_input_fields(report_map)
+        return cls(fields, report_bits)
 
     def decode(self, report_id: int, data: bytes) -> tuple[HidUsage, ...]:
         """Return active usages from one report payload.
@@ -76,8 +80,17 @@ class HidReportDecoder:
                 decoded.append(HidUsage(page, usage_id, usage_name(page, usage_id)))
         return tuple(decoded)
 
+    def input_report_size_bytes(self, report_id: int) -> int | None:
+        """Return the descriptor-declared payload size for an input report."""
+        final_bit = self._report_bits.get(report_id)
+        if final_bit is None:
+            return None
+        return (final_bit + 7) // 8
 
-def _parse_input_fields(report_map: bytes) -> tuple[HidInputField, ...]:
+
+def _parse_input_fields(
+    report_map: bytes,
+) -> tuple[tuple[HidInputField, ...], dict[int, int]]:
     usage_page = 0
     report_size = 0
     report_count = 0
@@ -167,7 +180,7 @@ def _parse_input_fields(report_map: bytes) -> tuple[HidInputField, ...]:
         usage_minimum = None
         usage_maximum = None
 
-    return tuple(fields)
+    return tuple(fields), bit_offsets
 
 
 def _qualified_usage(page: int, value: int, size: int) -> tuple[int, int]:

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryError
 
 from .const import (
+    CONF_ADDRESS,
     CONF_KEY_PROFILE,
     KEY_PROFILE_ANDROID_TV,
     KEY_PROFILE_HID,
@@ -14,6 +17,9 @@ from .const import (
 )
 from .keymap import KeyMapError, async_create_key_mapper
 from .manager import BluetoothHidRemoteManager
+from .pairing import PairingError, async_remove_hogp_device
+
+_LOGGER = logging.getLogger(__name__)
 
 type BluetoothHidRemoteConfigEntry = ConfigEntry[BluetoothHidRemoteManager]
 
@@ -49,6 +55,20 @@ async def async_unload_entry(
         return False
     await entry.runtime_data.async_stop()
     return True
+
+
+async def async_remove_entry(
+    hass: HomeAssistant, entry: BluetoothHidRemoteConfigEntry
+) -> None:
+    """Remove only this config entry's BlueZ bond after entry deletion."""
+    try:
+        await async_remove_hogp_device(entry.data[CONF_ADDRESS], ignore_missing=True)
+    except PairingError:
+        _LOGGER.exception(
+            "Could not remove Bluetooth HID bond for deleted entry %s",
+            entry.data[CONF_ADDRESS],
+        )
+        raise
 
 
 async def _async_update_listener(
