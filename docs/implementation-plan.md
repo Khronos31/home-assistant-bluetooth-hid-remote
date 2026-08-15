@@ -387,10 +387,30 @@ Passing one cell never implies support for another.
 - Version 1.0 advertises 8/16 kHz ADPCM and interaction modes including
   on-request, press-to-talk, and hold-to-talk. This is materially different
   from AR's 80-byte Opus-over-HOGP reports.
-- The next non-destructive hardware probe is to enumerate these three UUIDs on
-  the bonded genuine remote and capture only control opcode/length metadata
-  while pressing its voice button. Audio decoding and v0.3.0 implementation
-  remain separate from the Fire/AR path.
+- BlueZ exposed all three ATVV characteristics on the genuine remote. The
+  observed handles were TX 54, Audio RX 56, and Control 59; these remain
+  diagnostics only and the implementation selects characteristics by UUID.
+- The host sent GET_CAPS `0A 01 00 00 03 00`. The remote replied
+  `0B 01 00 03 00 00 C8 00 00`: ATVV 1.0, 8/16 kHz ADPCM, on-request
+  interaction, and a 200-byte audio frame.
+- Search (`0x08`) followed by host MIC_OPEN Capture (`0C 01`) produced Audio
+  Start (`04 00 02 00`) and 200-byte Audio RX notifications. A bounded
+  five-second run delivered 193--194 packets before host MIC_CLOSE (`0D 00`)
+  and Audio Stop (`00 00`). The packet cadence and size account for 400 ADPCM
+  samples / 25 ms per notification at 16 kHz.
+- Codec `0x02` is the reference firmware's 16 kHz IMA ADPCM mode. It is a
+  continuous stream initialized with predictor 0 and step index 1, with the
+  first code in each byte's high nibble. Control sync `0x0A`, when present,
+  supplies a replacement codec, sequence, signed predictor, and step index.
+- The unreleased implementation decodes each bounded notification directly to
+  16 kHz signed-16 mono PCM, keeps it outside event/entity state and logs, and
+  feeds the same per-device Assist satellite used by the HOGP/Opus path. A
+  genuine-device run recognized `今、何時ですか？` exactly and completed the
+  Intent stage successfully.
+- This establishes the genuine Google transport but does not complete v0.3.0:
+  the separately purchased compatible Google TV remote remains an independent
+  required test target. It also does not unblock v0.2.0, whose release gate is
+  still genuine Fire TV hardware.
 
 [google-atvv-gatt]: https://android.googlesource.com/platform/hardware/telink/atv/refDesignRcu/+/refs/heads/master/vendor/827x_ble_remote/app_att.c
 [google-atvv-control]: https://android.googlesource.com/platform/hardware/telink/atv/refDesignRcu/+/86f501098fb4ba60954cb046201ffe43ca360c3e/application/audio/gl_audio.h

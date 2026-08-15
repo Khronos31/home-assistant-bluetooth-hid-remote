@@ -9,6 +9,9 @@ from bleak.backends.bluezdbus import defs
 from dbus_fast.constants import MessageType
 
 from custom_components.bluetooth_hid_remote.const import (
+    ATVV_CONTROL_UUID,
+    ATVV_RX_UUID,
+    ATVV_TX_UUID,
     EVENT_KEY_PRESSED,
     EVENT_KEY_RELEASED,
     HID_REPORT_MAP_UUID,
@@ -24,7 +27,11 @@ from custom_components.bluetooth_hid_remote.manager import (
     event_type_for_report,
     parse_report_reference,
 )
-from custom_components.bluetooth_hid_remote.voice import HidVoicePacket
+from custom_components.bluetooth_hid_remote.voice import (
+    HidVoicePacket,
+    PcmVoicePacket,
+    VoicePacket,
+)
 
 
 @pytest.mark.asyncio
@@ -68,6 +75,8 @@ def test_bluez_connection_only_updates_passive_state() -> None:
     manager.connected = False
     manager.input_report_count = 3
     manager._report_metadata_by_path = {"path": (1, 2)}
+    manager._atvv_paths = {"atvv": "control"}
+    manager._atvv_close_timer = None
     manager._ignored_value_paths = {"metadata"}
     manager._initial_cached_values_by_path = {"path": b"cached"}
     manager._active_usages_by_path = {}
@@ -88,6 +97,7 @@ def test_bluez_connection_only_updates_passive_state() -> None:
     assert not manager.connected
     assert manager.input_report_count == 0
     assert manager._report_metadata_by_path == {}
+    assert manager._atvv_paths == {}
     assert manager._ignored_value_paths == set()
     assert manager._initial_cached_values_by_path == {}
     assert manager._active_report_paths == set()
@@ -194,6 +204,40 @@ async def test_late_subscription_is_released_while_stopping() -> None:
         "StopNotify",
     ]
     assert manager._notification_paths == set()
+
+
+@pytest.mark.asyncio
+async def test_atvv_command_uses_exact_bluez_write_value_payload() -> None:
+    """Voice negotiation writes only the documented command to ATVV TX."""
+
+    class Bus:
+        connected = True
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def call(self, message):
+            self.calls.append(message)
+            return SimpleNamespace(
+                message_type=MessageType.METHOD_RETURN,
+                error_name=None,
+            )
+
+    bus = Bus()
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    manager.connected = True
+    manager._stopping = False
+    manager._atvv_tx_path = "/service0010/char0020"
+    manager._bluez_manager = SimpleNamespace(_bus=bus)
+
+    await manager._async_write_atvv(bytes.fromhex("0a0100000300"), "GET_CAPS")
+
+    message = bus.calls[0]
+    assert message.member == "WriteValue"
+    assert message.signature == "aya{sv}"
+    assert message.body[0] == bytes.fromhex("0a0100000300")
+    assert message.body[1]["type"].value == "command"
 
 
 @pytest.mark.asyncio
@@ -309,6 +353,78 @@ def test_descriptor_backed_opus_report_is_not_published_as_a_key() -> None:
     assert key_reports == []
     assert manager.last_report is None
     assert voice_reports == [HidVoicePacket(0xF0, 0x65, packet)]
+
+
+def test_atvv_characteristics_are_mapped_without_tx_subscription() -> None:
+    """The passive probe subscribes only to Google control and audio paths."""
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    tx = SimpleNamespace(
+        uuid=ATVV_TX_UUID,
+        handle=0x20,
+        properties=["write"],
+        obj=("/service0010/char0020", {}),
+    )
+    audio = SimpleNamespace(
+        uuid=ATVV_RX_UUID,
+        handle=0x22,
+        properties=["notify"],
+        obj=("/service0010/char0022", {}),
+    )
+    control = SimpleNamespace(
+        uuid=ATVV_CONTROL_UUID,
+        handle=0x24,
+        properties=["notify"],
+        obj=("/service0010/char0024", {}),
+    )
+
+    paths = manager._map_atvv_characteristics(
+        SimpleNamespace(characteristics=[control, tx, audio])
+    )
+
+    assert paths == ["/service0010/char0022", "/service0010/char0024"]
+    assert manager._atvv_tx_path == "/service0010/char0020"
+    assert manager._atvv_paths == {
+        "/service0010/char0022": "audio",
+        "/service0010/char0024": "control",
+    }
+
+
+def test_atvv_values_never_enter_key_pipeline(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """ATVV audio becomes dedicated PCM without entering key/log pipelines."""
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    control_path = "/service0010/char0024"
+    audio_path = "/service0010/char0022"
+    manager._atvv_paths = {control_path: "control", audio_path: "audio"}
+    manager._atvv_audio_packet_count = 0
+    manager._atvv_decoder = None
+    manager._atvv_frame_bytes = 200
+    manager._ignored_value_paths = set()
+    manager._initial_cached_values_by_path = {}
+    manager._report_metadata_by_path = {}
+    manager._listeners = {pytest.fail}
+    manager._voice_listeners = set()
+    manager.last_voice_packet = None
+    voice_packets: list[VoicePacket | None] = []
+    manager._voice_listeners = {voice_packets.append}
+
+    with caplog.at_level("DEBUG"):
+        manager._async_bluez_value_changed(control_path, bytes.fromhex("04000200"))
+        manager._async_bluez_value_changed(audio_path, bytes.fromhex("deadbeef"))
+
+    assert "opcode=0x04 bytes=4" in caplog.text
+    assert "ATVV audio address=" in caplog.text
+    assert "deadbeef" not in caplog.text
+    assert manager._atvv_audio_packet_count == 1
+    assert voice_packets == [
+        PcmVoicePacket(
+            16_000,
+            bytes.fromhex("f5ffe2ffd6ffbdffa5ff7dff35ff9ffe"),
+        )
+    ]
 
 
 def test_report_id_alone_cannot_hide_a_normal_key_report() -> None:

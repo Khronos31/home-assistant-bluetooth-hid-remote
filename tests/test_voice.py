@@ -6,7 +6,10 @@ import pytest
 
 from custom_components.bluetooth_hid_remote.voice import (
     MAX_VOICE_PACKETS,
+    AtvvImaAdpcmDecoder,
     OpusVoiceBuffer,
+    PcmVoiceBuffer,
+    PcmVoicePacket,
     VoiceTransportError,
     async_decode_opus_packets,
     build_ogg_opus,
@@ -54,6 +57,40 @@ def test_ogg_wrapper_has_headers_pages_and_eos() -> None:
 def test_ogg_wrapper_rejects_unbounded_input() -> None:
     with pytest.raises(VoiceTransportError, match="too many"):
         build_ogg_opus([_silence_packet()] * (MAX_VOICE_PACKETS + 1))
+
+
+def test_atvv_adpcm_uses_android_tv_high_nibble_order() -> None:
+    """The continuous decoder matches Telink's high-nibble-first wire order."""
+    decoder = AtvvImaAdpcmDecoder()
+
+    pcm = decoder.decode(bytes.fromhex("018f"))
+
+    assert pcm == bytes.fromhex("010002000200f7ff")
+    assert decoder.predictor == -9
+    assert decoder.step_index == 8
+
+
+def test_atvv_adpcm_sync_state_is_validated() -> None:
+    decoder = AtvvImaAdpcmDecoder()
+    decoder.reset(-1234, 42)
+
+    assert decoder.predictor == -1234
+    assert decoder.step_index == 42
+    with pytest.raises(VoiceTransportError, match="step index"):
+        decoder.reset(0, 89)
+    with pytest.raises(VoiceTransportError, match="packet size"):
+        decoder.decode(b"")
+
+
+def test_pcm_voice_buffer_is_bounded_and_mono_s16() -> None:
+    buffer = PcmVoiceBuffer(max_bytes=4)
+    buffer.append(PcmVoicePacket(16_000, b"\x01\x00\x02\x00"))
+
+    assert buffer.to_pcm() == b"\x01\x00\x02\x00"
+    with pytest.raises(VoiceTransportError, match="size limit"):
+        buffer.append(PcmVoicePacket(16_000, b"\x03\x00"))
+    with pytest.raises(VoiceTransportError, match="sample rate"):
+        PcmVoiceBuffer().append(PcmVoicePacket(8_000, b"\x00\x00"))
 
 
 @pytest.mark.asyncio

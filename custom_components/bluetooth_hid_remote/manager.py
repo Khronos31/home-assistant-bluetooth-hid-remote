@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from asyncio import Lock
+from asyncio import Lock, TimerHandle
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -16,6 +16,7 @@ from bleak.backends.bluezdbus.manager import (
 )
 from bleak.backends.bluezdbus.utils import assert_gatt_reply, assert_reply
 from dbus_fast.message import Message
+from dbus_fast.signature import Variant
 from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth import (
     BluetoothCallbackMatcher,
@@ -25,6 +26,10 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 
 from .const import (
+    ATVV_CONTROL_UUID,
+    ATVV_RX_UUID,
+    ATVV_SERVICE_UUID,
+    ATVV_TX_UUID,
     CONF_ADDRESS,
     CONF_NAME,
     EVENT_KEY_PRESSED,
@@ -39,15 +44,30 @@ from .hid import HidReportDecoder, HidUsage
 from .input_grab import BluetoothInputGrabber, InputGrabStatus
 from .keymap import KeyMapper
 from .voice import (
+    ATVV_CODEC_ADPCM_16K,
     VOICE_PACKET_SIZE,
     VOICE_REPORT_ID,
+    AtvvImaAdpcmDecoder,
     HidVoicePacket,
+    PcmVoicePacket,
+    VoicePacket,
+    VoiceTransportError,
     is_supported_opus_packet,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
-type VoiceListener = Callable[[HidVoicePacket | None], None]
+type VoiceListener = Callable[[VoicePacket | None], None]
+
+_ATVV_CHARACTERISTIC_KINDS = {
+    ATVV_TX_UUID: "tx",
+    ATVV_RX_UUID: "audio",
+    ATVV_CONTROL_UUID: "control",
+}
+_ATVV_GET_CAPS = bytes.fromhex("0a0100000300")
+_ATVV_MIC_OPEN_CAPTURE = bytes.fromhex("0c01")
+_ATVV_MIC_CLOSE_ON_REQUEST = bytes.fromhex("0d00")
+_ATVV_CAPTURE_SECONDS = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,7 +134,7 @@ class BluetoothHidRemoteManager:
         self.input_report_count = 0
         self.report_map: bytes | None = None
         self.last_report: HidInputReport | None = None
-        self.last_voice_packet: HidVoicePacket | None = None
+        self.last_voice_packet: VoicePacket | None = None
         self.connection_failures = 0
         self.input_grabber = BluetoothInputGrabber(
             self.address,
@@ -130,6 +150,13 @@ class BluetoothHidRemoteManager:
         self._bluez_watcher: DeviceWatcher | None = None
         self._device_path: str | None = None
         self._report_metadata_by_path: dict[str, tuple[int, int]] = {}
+        self._atvv_paths: dict[str, str] = {}
+        self._atvv_tx_path: str | None = None
+        self._atvv_close_timer: TimerHandle | None = None
+        self._atvv_audio_packet_count = 0
+        self._atvv_capture_active = False
+        self._atvv_decoder: AtvvImaAdpcmDecoder | None = None
+        self._atvv_frame_bytes: int | None = None
         self._ignored_value_paths: set[str] = set()
         self._initial_cached_values_by_path: dict[str, bytes] = {}
         self._report_decoder: HidReportDecoder | None = None
@@ -157,6 +184,18 @@ class BluetoothHidRemoteManager:
 
     async def async_stop(self) -> None:
         """Remove observers without disconnecting the HID remote."""
+        if self._atvv_close_timer is not None:
+            self._cancel_atvv_capture()
+            try:
+                await self._async_write_atvv(
+                    _ATVV_MIC_CLOSE_ON_REQUEST, "MIC_CLOSE_ON_UNLOAD"
+                )
+            except Exception:
+                _LOGGER.debug(
+                    "Could not close ATVV capture while unloading %s",
+                    self.address,
+                    exc_info=True,
+                )
         self._stopping = True
         try:
             if self._unsub_bluetooth is not None:
@@ -172,6 +211,7 @@ class BluetoothHidRemoteManager:
             self._publish_voice_packet(None)
             self._active_usages_by_path.clear()
             self._active_report_paths.clear()
+            self._atvv_paths.clear()
             self._ignored_value_paths.clear()
             self._initial_cached_values_by_path.clear()
         finally:
@@ -233,18 +273,25 @@ class BluetoothHidRemoteManager:
         return lambda: self._listeners.discard(listener)
 
     def async_add_voice_listener(self, listener: VoiceListener) -> CALLBACK_TYPE:
-        """Subscribe to validated Opus packets and stream termination."""
+        """Subscribe to validated voice packets and stream termination."""
         self._voice_listeners.add(listener)
         return lambda: self._voice_listeners.discard(listener)
 
     @property
     def supports_voice(self) -> bool:
-        """Return whether the HID descriptor declares the known voice report."""
-        return bool(
+        """Return whether HID Opus or Android TV Voice is available."""
+        supports_hid_opus = bool(
             self._report_decoder is not None
             and self._report_decoder.input_report_size_bytes(VOICE_REPORT_ID)
             == VOICE_PACKET_SIZE
         )
+        supports_atvv = bool(
+            getattr(self, "_atvv_tx_path", None) is not None
+            and {"audio", "control"}.issubset(
+                set(getattr(self, "_atvv_paths", {}).values())
+            )
+        )
+        return supports_hid_opus or supports_atvv
 
     @callback
     def _async_bluetooth_update(self, *_: Any) -> None:
@@ -264,6 +311,8 @@ class BluetoothHidRemoteManager:
         _LOGGER.debug("BlueZ HID connection %s connected=%s", self.address, connected)
         if not connected:
             self._report_metadata_by_path.clear()
+            self._atvv_paths.clear()
+            self._cancel_atvv_capture()
             self._ignored_value_paths.clear()
             self._initial_cached_values_by_path.clear()
             self._active_usages_by_path.clear()
@@ -290,7 +339,7 @@ class BluetoothHidRemoteManager:
             services = await manager.get_services(
                 device_path,
                 use_cached=False,
-                requested_services={HID_SERVICE_UUID},
+                requested_services={HID_SERVICE_UUID, ATVV_SERVICE_UUID},
             )
         except Exception:
             self.connection_failures += 1
@@ -301,9 +350,13 @@ class BluetoothHidRemoteManager:
             )
             return
 
+        atvv_notification_paths = self._map_atvv_characteristics(
+            services.get_service(ATVV_SERVICE_UUID)
+        )
         service = services.get_service(HID_SERVICE_UUID)
         if service is None:
             _LOGGER.debug("BlueZ exposed no HOGP GATT service for %s", self.address)
+            await self._async_start_notifications(atvv_notification_paths)
             return
 
         metadata: dict[str, tuple[int, int]] = {}
@@ -330,7 +383,53 @@ class BluetoothHidRemoteManager:
             len(metadata),
             self.address,
         )
-        await self._async_start_notifications(notification_paths)
+        await self._async_start_notifications(
+            [*notification_paths, *atvv_notification_paths]
+        )
+        if self._atvv_tx_path is not None:
+            # StartNotify may echo an old cached value. It has completed now,
+            # so the identical response to this fresh request must be parsed.
+            for path in atvv_notification_paths:
+                self._initial_cached_values_by_path.pop(path, None)
+            await self._async_write_atvv(_ATVV_GET_CAPS, "GET_CAPS")
+
+    def _map_atvv_characteristics(self, service) -> list[str]:
+        """Map Google's proprietary voice paths without sending commands."""
+        paths: dict[str, str] = {}
+        notifications: list[str] = []
+        self._atvv_tx_path = None
+        if service is None:
+            self._atvv_paths = paths
+            _LOGGER.debug("BlueZ exposed no ATVV GATT service for %s", self.address)
+            return notifications
+
+        discovered: list[str] = []
+        for characteristic in sorted(
+            service.characteristics, key=lambda item: item.handle
+        ):
+            uuid = characteristic.uuid.lower()
+            kind = _ATVV_CHARACTERISTIC_KINDS.get(uuid)
+            if kind is None:
+                continue
+            discovered.append(f"{kind}@{characteristic.handle}")
+            if kind == "tx":
+                self._atvv_tx_path = self._gatt_object_path(characteristic)
+                continue
+            if not ({"notify", "indicate"} & set(characteristic.properties)):
+                continue
+            path = self._gatt_object_path(characteristic)
+            if path is None:
+                continue
+            paths[path] = kind
+            notifications.append(path)
+
+        self._atvv_paths = paths
+        _LOGGER.debug(
+            "Detected ATVV GATT service for %s characteristics=%s",
+            self.address,
+            ",".join(discovered) or "none",
+        )
+        return notifications
 
     async def _async_load_hid_metadata(self, service, metadata) -> None:
         """Read static Report Map and Report References on BlueZ's connection."""
@@ -420,6 +519,93 @@ class BluetoothHidRemoteManager:
         )
         assert_gatt_reply(reply)
         return bytes(reply.body[0])
+
+    async def _async_write_atvv(self, value: bytes, operation: str) -> None:
+        """Write one bounded ATVV control command over BlueZ's connection."""
+        manager = self._bluez_manager
+        bus = manager._bus if manager is not None else None
+        path = self._atvv_tx_path
+        if (
+            bus is None
+            or not bus.connected
+            or not self.connected
+            or self._stopping
+            or path is None
+        ):
+            _LOGGER.debug(
+                "Skipped ATVV %s for disconnected %s", operation, self.address
+            )
+            return
+        reply = await bus.call(
+            Message(
+                destination=defs.BLUEZ_SERVICE,
+                path=path,
+                interface=defs.GATT_CHARACTERISTIC_INTERFACE,
+                member="WriteValue",
+                signature="aya{sv}",
+                body=[bytes(value), {"type": Variant("s", "command")}],
+            )
+        )
+        assert_gatt_reply(reply)
+        _LOGGER.debug(
+            "Sent ATVV %s address=%s bytes=%d", operation, self.address, len(value)
+        )
+
+    async def _async_start_atvv_capture(self) -> None:
+        """Open one short bounded capture after a genuine remote search."""
+        if self._atvv_capture_active:
+            _LOGGER.debug("Ignored overlapping ATVV search for %s", self.address)
+            return
+        self._cancel_atvv_capture()
+        self._atvv_audio_packet_count = 0
+        self._atvv_decoder = None
+        try:
+            await self._async_write_atvv(_ATVV_MIC_OPEN_CAPTURE, "MIC_OPEN")
+        except Exception:
+            _LOGGER.debug(
+                "Could not send ATVV MIC_OPEN to %s", self.address, exc_info=True
+            )
+            return
+        self._atvv_capture_active = True
+        self._atvv_close_timer = self.hass.loop.call_later(
+            _ATVV_CAPTURE_SECONDS,
+            self._schedule_atvv_close,
+        )
+
+    @callback
+    def _schedule_atvv_close(self) -> None:
+        """Schedule the bounded capture close from the timer callback."""
+        self._atvv_close_timer = None
+        self.entry.async_create_background_task(
+            self.hass,
+            self._async_close_atvv_capture(),
+            name=f"Close ATVV capture {self.address}",
+        )
+
+    async def _async_close_atvv_capture(self) -> None:
+        """Close the on-request stream and report only its packet count."""
+        try:
+            await self._async_write_atvv(_ATVV_MIC_CLOSE_ON_REQUEST, "MIC_CLOSE")
+        except Exception:
+            _LOGGER.debug(
+                "Could not send ATVV MIC_CLOSE to %s", self.address, exc_info=True
+            )
+        finally:
+            self._atvv_capture_active = False
+            _LOGGER.debug(
+                "ATVV capture address=%s audio_packets=%d",
+                self.address,
+                self._atvv_audio_packet_count,
+            )
+
+    @callback
+    def _cancel_atvv_capture(self) -> None:
+        """Cancel only the local close timer during disconnect or unload."""
+        if self._atvv_close_timer is not None:
+            self._atvv_close_timer.cancel()
+            self._atvv_close_timer = None
+        self._atvv_capture_active = False
+        self._atvv_decoder = None
 
     async def _async_start_notifications(self, paths: list[str]) -> None:
         """Subscribe on BlueZ's existing connection without owning its lifetime."""
@@ -528,15 +714,133 @@ class BluetoothHidRemoteManager:
         if path in self._ignored_value_paths:
             _LOGGER.debug("Ignored static HID metadata value path=%s", path)
             return
+        atvv_kind = getattr(self, "_atvv_paths", {}).get(path)
         if path in self._initial_cached_values_by_path:
             initial_value = self._initial_cached_values_by_path.pop(path)
             if value == initial_value:
-                _LOGGER.debug(
-                    "Ignored initial cached HID value path=%s data=%s",
-                    path,
-                    value.hex(),
-                )
+                if atvv_kind is not None:
+                    _LOGGER.debug(
+                        "Ignored initial cached ATVV value path=%s kind=%s bytes=%d",
+                        path,
+                        atvv_kind,
+                        len(value),
+                    )
+                else:
+                    _LOGGER.debug(
+                        "Ignored initial cached HID value path=%s data=%s",
+                        path,
+                        value.hex(),
+                    )
                 return
+        if atvv_kind is not None:
+            if atvv_kind == "control":
+                raw_opcode = value[0] if value else None
+                opcode = f"0x{raw_opcode:02x}" if raw_opcode is not None else "empty"
+                _LOGGER.debug(
+                    "ATVV control address=%s opcode=%s bytes=%d",
+                    self.address,
+                    opcode,
+                    len(value),
+                )
+                if raw_opcode == 0x0B and len(value) >= 9:
+                    self._atvv_frame_bytes = int.from_bytes(value[5:7], "big")
+                    _LOGGER.debug(
+                        "ATVV capabilities address=%s version=%d.%d codecs=0x%02x "
+                        "interaction=0x%02x frame_bytes=%d extra=0x%02x",
+                        self.address,
+                        value[1],
+                        value[2],
+                        value[3],
+                        value[4],
+                        self._atvv_frame_bytes,
+                        value[7],
+                    )
+                elif raw_opcode == 0x08:
+                    self.entry.async_create_background_task(
+                        self.hass,
+                        self._async_start_atvv_capture(),
+                        name=f"Open ATVV capture {self.address}",
+                    )
+                elif raw_opcode == 0x04 and len(value) >= 4:
+                    codec = value[2]
+                    self._atvv_decoder = (
+                        AtvvImaAdpcmDecoder() if codec == ATVV_CODEC_ADPCM_16K else None
+                    )
+                    _LOGGER.debug(
+                        "ATVV audio start address=%s reason=0x%02x codec=0x%02x "
+                        "stream_id=%d",
+                        self.address,
+                        value[1],
+                        value[2],
+                        value[3],
+                    )
+                    if self._atvv_decoder is None:
+                        _LOGGER.warning(
+                            "Ignored unsupported ATVV audio codec 0x%02x from %s",
+                            codec,
+                            self.address,
+                        )
+                elif raw_opcode == 0x0A and len(value) >= 7:
+                    codec = value[1]
+                    if codec == ATVV_CODEC_ADPCM_16K:
+                        predictor = int.from_bytes(value[4:6], "big", signed=True)
+                        step_index = value[6]
+                        try:
+                            decoder = self._atvv_decoder or AtvvImaAdpcmDecoder()
+                            decoder.reset(predictor, step_index)
+                            self._atvv_decoder = decoder
+                        except VoiceTransportError:
+                            self._atvv_decoder = None
+                            _LOGGER.warning(
+                                "Ignored invalid ATVV synchronization from %s",
+                                self.address,
+                            )
+                    _LOGGER.debug(
+                        "ATVV audio sync address=%s codec=0x%02x sequence=%d",
+                        self.address,
+                        codec,
+                        int.from_bytes(value[2:4], "big"),
+                    )
+                elif raw_opcode == 0x00:
+                    _LOGGER.debug(
+                        "ATVV audio stop address=%s reason=%s",
+                        self.address,
+                        f"0x{value[1]:02x}" if len(value) >= 2 else "unspecified",
+                    )
+                    self._cancel_atvv_capture()
+                    self._publish_voice_packet(None)
+            else:
+                self._atvv_audio_packet_count += 1
+                decoder = getattr(self, "_atvv_decoder", None)
+                if decoder is None:
+                    return
+                frame_bytes = getattr(self, "_atvv_frame_bytes", None)
+                if frame_bytes and len(value) > frame_bytes:
+                    _LOGGER.warning(
+                        "Ignored oversized ATVV audio packet from %s: %d > %d",
+                        self.address,
+                        len(value),
+                        frame_bytes,
+                    )
+                    return
+                try:
+                    pcm = decoder.decode(value)
+                except VoiceTransportError as err:
+                    self._atvv_decoder = None
+                    _LOGGER.warning(
+                        "Stopped ATVV audio decode for %s: %s", self.address, err
+                    )
+                    self._publish_voice_packet(None)
+                    return
+                self._publish_voice_packet(PcmVoicePacket(16_000, pcm))
+                if self._atvv_audio_packet_count == 1:
+                    _LOGGER.debug(
+                        "ATVV audio address=%s encoded_bytes=%d pcm_bytes=%d",
+                        self.address,
+                        len(value),
+                        len(pcm),
+                    )
+            return
         metadata = self._report_metadata_by_path.get(path)
         if metadata is None:
             handle = characteristic_handle_from_path(path)
@@ -603,10 +907,10 @@ class BluetoothHidRemoteManager:
             listener(report)
 
     @callback
-    def _publish_voice_packet(self, packet: HidVoicePacket | None) -> None:
+    def _publish_voice_packet(self, packet: VoicePacket | None) -> None:
         """Publish voice outside the key-event and last-key pipelines."""
         self.last_voice_packet = packet
-        if packet is not None:
+        if isinstance(packet, HidVoicePacket):
             _LOGGER.debug(
                 "HID voice address=%s report_id=%d handle=%d bytes=%d",
                 self.address,

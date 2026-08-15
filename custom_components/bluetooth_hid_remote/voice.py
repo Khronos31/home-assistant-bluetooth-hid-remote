@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
-from struct import pack
+from struct import pack, pack_into
 from typing import Final
 
 VOICE_REPORT_ID: Final = 0xF0
@@ -16,6 +16,118 @@ VOICE_SAMPLE_RATE: Final = 16_000
 MAX_VOICE_PACKETS: Final = 750
 MAX_PCM_BYTES: Final = VOICE_SAMPLE_RATE * 2 * 20
 FFMPEG_TIMEOUT: Final = 20.0
+ATVV_CODEC_ADPCM_16K: Final = 0x02
+ATVV_MAX_PACKET_BYTES: Final = 512
+
+_IMA_INDEX_TABLE: Final = (
+    -1,
+    -1,
+    -1,
+    -1,
+    2,
+    4,
+    6,
+    8,
+    -1,
+    -1,
+    -1,
+    -1,
+    2,
+    4,
+    6,
+    8,
+)
+_IMA_STEP_TABLE: Final = (
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    16,
+    17,
+    19,
+    21,
+    23,
+    25,
+    28,
+    31,
+    34,
+    37,
+    41,
+    45,
+    50,
+    55,
+    60,
+    66,
+    73,
+    80,
+    88,
+    97,
+    107,
+    118,
+    130,
+    143,
+    157,
+    173,
+    190,
+    209,
+    230,
+    253,
+    279,
+    307,
+    337,
+    371,
+    408,
+    449,
+    494,
+    544,
+    598,
+    658,
+    724,
+    796,
+    876,
+    963,
+    1060,
+    1166,
+    1282,
+    1411,
+    1552,
+    1707,
+    1878,
+    2066,
+    2272,
+    2499,
+    2749,
+    3024,
+    3327,
+    3660,
+    4026,
+    4428,
+    4871,
+    5358,
+    5894,
+    6484,
+    7132,
+    7845,
+    8630,
+    9493,
+    10442,
+    11487,
+    12635,
+    13899,
+    15289,
+    16818,
+    18500,
+    20350,
+    22385,
+    24623,
+    27086,
+    29794,
+    32767,
+)
 
 
 class VoiceTransportError(RuntimeError):
@@ -29,6 +141,17 @@ class HidVoicePacket:
     report_id: int
     characteristic_handle: int
     data: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class PcmVoicePacket:
+    """One decoded mono PCM chunk from a proprietary remote transport."""
+
+    sample_rate: int
+    data: bytes
+
+
+type VoicePacket = HidVoicePacket | PcmVoicePacket
 
 
 @dataclass(slots=True)
@@ -52,6 +175,77 @@ class OpusVoiceBuffer:
         if not self.packets:
             raise VoiceTransportError("HID voice recording is empty")
         return build_ogg_opus(self.packets)
+
+
+@dataclass(slots=True)
+class PcmVoiceBuffer:
+    """Collect one bounded 16 kHz mono signed-16 PCM utterance."""
+
+    max_bytes: int = MAX_PCM_BYTES
+    chunks: list[bytes] = field(default_factory=list)
+    byte_count: int = 0
+
+    def append(self, packet: PcmVoicePacket) -> None:
+        """Append one validated PCM chunk without allowing unbounded growth."""
+        if packet.sample_rate != VOICE_SAMPLE_RATE:
+            raise VoiceTransportError("unsupported PCM sample rate")
+        if not packet.data or len(packet.data) % 2:
+            raise VoiceTransportError("invalid signed-16 PCM chunk")
+        if self.byte_count + len(packet.data) > self.max_bytes:
+            raise VoiceTransportError("PCM voice recording exceeded its size limit")
+        self.chunks.append(packet.data)
+        self.byte_count += len(packet.data)
+
+    def to_pcm(self) -> bytes:
+        """Return one bounded Assist-compatible PCM stream."""
+        if not self.chunks:
+            raise VoiceTransportError("PCM voice recording is empty")
+        return b"".join(self.chunks)
+
+
+@dataclass(slots=True)
+class AtvvImaAdpcmDecoder:
+    """Decode Android TV Voice v1.0's continuous IMA ADPCM stream."""
+
+    predictor: int = 0
+    step_index: int = 1
+
+    def reset(self, predictor: int = 0, step_index: int = 1) -> None:
+        """Apply the default state or an ATVV synchronization point."""
+        if not -32768 <= predictor <= 32767:
+            raise VoiceTransportError("ATVV ADPCM predictor is out of range")
+        if not 0 <= step_index < len(_IMA_STEP_TABLE):
+            raise VoiceTransportError("ATVV ADPCM step index is out of range")
+        self.predictor = predictor
+        self.step_index = step_index
+
+    def decode(self, data: bytes | bytearray) -> bytes:
+        """Decode one bounded chunk, preserving state across notifications."""
+        value = bytes(data)
+        if not value or len(value) > ATVV_MAX_PACKET_BYTES:
+            raise VoiceTransportError("invalid ATVV ADPCM packet size")
+
+        output = bytearray(len(value) * 4)
+        offset = 0
+        for packed_codes in value:
+            # Android TV remote firmware sends the first sample in the high
+            # nibble, unlike the low-nibble-first WAV IMA block layout.
+            for code in (packed_codes >> 4, packed_codes & 0x0F):
+                step = _IMA_STEP_TABLE[self.step_index]
+                difference = step >> 3
+                if code & 0x04:
+                    difference += step
+                if code & 0x02:
+                    difference += step >> 1
+                if code & 0x01:
+                    difference += step >> 2
+                self.predictor += -difference if code & 0x08 else difference
+                self.predictor = min(32767, max(-32768, self.predictor))
+                self.step_index += _IMA_INDEX_TABLE[code]
+                self.step_index = min(88, max(0, self.step_index))
+                pack_into("<h", output, offset, self.predictor)
+                offset += 2
+        return bytes(output)
 
 
 def is_supported_opus_packet(data: bytes | bytearray) -> bool:

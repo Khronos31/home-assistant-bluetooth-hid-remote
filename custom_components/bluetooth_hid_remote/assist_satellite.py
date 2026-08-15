@@ -38,6 +38,9 @@ from .voice import (
     MAX_VOICE_PACKETS,
     HidVoicePacket,
     OpusVoiceBuffer,
+    PcmVoiceBuffer,
+    PcmVoicePacket,
+    VoicePacket,
     VoiceTransportError,
     async_decode_opus_packets,
 )
@@ -81,7 +84,7 @@ class BluetoothHidRemoteAssistSatellite(assist_satellite.AssistSatelliteEntity):
             model="BLE HID Remote",
             name=self._manager.name,
         )
-        self._voice_buffer: OpusVoiceBuffer | None = None
+        self._voice_buffer: OpusVoiceBuffer | PcmVoiceBuffer | None = None
         self._voice_timeout: asyncio.TimerHandle | None = None
         self._processing_task: asyncio.Task[Any] | None = None
 
@@ -136,32 +139,44 @@ class BluetoothHidRemoteAssistSatellite(assist_satellite.AssistSatelliteEntity):
             self._start_recording()
 
     @callback
-    def _receive_voice_packet(self, packet: HidVoicePacket | None) -> None:
-        """Collect validated Opus packets, or finish on disconnect."""
+    def _receive_voice_packet(self, packet: VoicePacket | None) -> None:
+        """Collect one validated voice transport, or finish on stop."""
         if packet is None:
             self._finish_recording()
             return
+        expected_type = (
+            PcmVoiceBuffer if isinstance(packet, PcmVoicePacket) else OpusVoiceBuffer
+        )
         if self._voice_buffer is None:
-            self._start_recording()
+            self._start_recording(expected_type())
         if self._voice_buffer is None:
             # A late packet from a just-finished utterance must not start a
             # second pipeline while the first one is decoding.
             return
+        if not isinstance(self._voice_buffer, expected_type):
+            _LOGGER.warning("Stopped mixed voice transports for %s", self.name)
+            self._finish_recording()
+            return
         try:
-            self._voice_buffer.append(packet.data)
+            if isinstance(packet, HidVoicePacket):
+                self._voice_buffer.append(packet.data)
+            else:
+                self._voice_buffer.append(packet)
         except VoiceTransportError as err:
             _LOGGER.warning("Stopped HID voice capture for %s: %s", self.name, err)
             self._finish_recording()
 
     @callback
-    def _start_recording(self) -> None:
+    def _start_recording(
+        self, buffer: OpusVoiceBuffer | PcmVoiceBuffer | None = None
+    ) -> None:
         """Start one bounded recording and ignore overlapping pipeline work."""
         if self._voice_buffer is not None:
             return
         if self._processing_task is not None and not self._processing_task.done():
             _LOGGER.debug("Ignored HID voice press while Assist is still processing")
             return
-        self._voice_buffer = OpusVoiceBuffer(max_packets=MAX_VOICE_PACKETS)
+        self._voice_buffer = buffer or OpusVoiceBuffer(max_packets=MAX_VOICE_PACKETS)
         self._set_state(AssistSatelliteState.LISTENING)
         self._voice_timeout = self.hass.loop.call_later(
             VOICE_TIMEOUT_SECONDS, self._finish_recording
@@ -175,21 +190,28 @@ class BluetoothHidRemoteAssistSatellite(assist_satellite.AssistSatelliteEntity):
             self._voice_timeout = None
         buffer = self._voice_buffer
         self._voice_buffer = None
-        if buffer is None or not buffer.packets:
+        if buffer is None or not (
+            buffer.packets if isinstance(buffer, OpusVoiceBuffer) else buffer.chunks
+        ):
             self._set_state(AssistSatelliteState.IDLE)
             return
         self._processing_task = self._entry.async_create_background_task(
             self.hass,
-            self._async_process_recording(list(buffer.packets)),
+            self._async_process_recording(buffer),
             name=f"Bluetooth HID Assist {self._manager.address}",
         )
 
-    async def _async_process_recording(self, packets: list[bytes]) -> None:
+    async def _async_process_recording(
+        self, buffer: OpusVoiceBuffer | PcmVoiceBuffer
+    ) -> None:
         """Decode one utterance, run STT/intent, and optionally play TTS."""
         try:
-            pcm = await async_decode_opus_packets(
-                get_ffmpeg_manager(self.hass).binary, packets
-            )
+            if isinstance(buffer, OpusVoiceBuffer):
+                pcm = await async_decode_opus_packets(
+                    get_ffmpeg_manager(self.hass).binary, list(buffer.packets)
+                )
+            else:
+                pcm = buffer.to_pcm()
 
             async def audio_stream() -> AsyncIterator[bytes]:
                 yield pcm

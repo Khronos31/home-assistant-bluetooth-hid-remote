@@ -20,6 +20,14 @@ HID_REPORT_REFERENCE_UUID: Final = "00002908-0000-1000-8000-00805f9b34fb"
 
 HID_REPORT_TYPE_INPUT: Final = 1
 
+# Android TV Voice (ATVV) GATT service used by genuine Google TV remotes.
+# The current integration observes only notification metadata while this
+# transport is being researched; it does not persist Google voice audio.
+ATVV_SERVICE_UUID: Final = "ab5e0001-5a21-4f05-bc7d-af01f617b664"
+ATVV_TX_UUID: Final = "ab5e0002-5a21-4f05-bc7d-af01f617b664"
+ATVV_RX_UUID: Final = "ab5e0003-5a21-4f05-bc7d-af01f617b664"
+ATVV_CONTROL_UUID: Final = "ab5e0004-5a21-4f05-bc7d-af01f617b664"
+
 EVENT_KEY_PRESSED: Final = "key_pressed"
 EVENT_KEY_RELEASED: Final = "key_released"
 EVENT_TYPES: Final = [EVENT_KEY_PRESSED, EVENT_KEY_RELEASED]
