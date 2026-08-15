@@ -1,11 +1,17 @@
 # Bluetooth HID Remote for Home Assistant
 
-Development-stage Home Assistant custom integration for Bluetooth Low Energy
+Experimental Home Assistant custom integration for Bluetooth Low Energy
 HID-over-GATT (HOGP) remote controls.
 
 The integration uses Home Assistant's directly attached Bluetooth adapter,
-subscribes to HID Report characteristics, and exposes button input through an
-event entity. It does not depend on Linux creating a `/dev/input` device.
+observes the HOGP connection owned by BlueZ, and exposes raw button reports
+through an event entity without depending on Linux `/dev/input`.
+
+BlueZ's built-in `input-hog` profile owns the remote's wake connection. The
+integration never connects, disconnects, or polls the remote; after BlueZ has
+connected it, the integration holds notification subscriptions on its input
+Report characteristics. A physical BLE remote has delivered press and release
+events through this path on Home Assistant OS 2026.8.1.
 
 Current version: **0.0.0**.
 
@@ -15,15 +21,19 @@ Current version: **0.0.0**.
 - A directly attached HAOS Bluetooth adapter.
 - The initial spike requires the remote to be paired and bonded already.
 - Event data is raw (`report_id`, characteristic handle, and hex payload).
+- BlueZ owns the HOGP connection; the integration must not alter its lifetime.
+- Devices with malformed GATT tables may fail BlueZ service discovery and need
+  an operating-system-side workaround. This integration does not modify HAOS
+  or BlueZ configuration.
 
 Classic Bluetooth HID and first-time pairing through ESPHome Bluetooth Proxy
 are not supported.
 
 ## Installation
 
-No stable release exists yet. During development, add this repository to HACS
-as a custom **Integration** repository only if you are participating in hardware
-validation. Stable releases will be installed through HACS in the usual way.
+Before the first tagged release, add this repository to HACS as a custom
+**Integration** repository only if you are participating in hardware
+validation. Tagged releases are installed through HACS in the usual way.
 
 After installation and a Home Assistant restart, wake a BLE HOGP remote and add
 **Bluetooth HID Remote** from Settings > Devices & services. A directly attached
@@ -38,8 +48,8 @@ python -m pip install -r requirements-test.txt
 ```
 
 `VERSION`, the Home Assistant manifest, and this README are synchronized by the
-workflow-dispatched release job. A stable release is intentionally blocked
-until a physical remote has delivered a button event to Home Assistant.
+workflow-dispatched release job. A release remains experimental until more HID
+remote models have been tested.
 
 ## License
 
