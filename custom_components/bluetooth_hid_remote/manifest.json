@@ -20,5 +20,5 @@
   "integration_type": "device",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/Khronos31/home-assistant-bluetooth-hid-remote/issues",
-  "version": "0.0.0"
+  "version": "0.1.0"
 }
