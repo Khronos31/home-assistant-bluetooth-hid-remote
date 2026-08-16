@@ -13,7 +13,7 @@ connected it, the integration holds notification subscriptions on its input
 Report characteristics. A physical BLE remote has delivered press and release
 events through this path on Home Assistant OS 2026.8.1.
 
-Current version: **0.1.0**.
+Current version: **0.2.0**.
 
 ## Current development scope
 
