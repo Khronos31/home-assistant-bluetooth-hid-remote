@@ -22,6 +22,7 @@ from .compatibility import (
     CompatibilityRepairError,
     CompatibilityRepairUnsupportedError,
     async_install_ar_gatt_cache,
+    async_restore_ar_gatt_cache,
     is_ar_cache_repair_candidate,
 )
 from .const import (
@@ -52,12 +53,15 @@ from .pairing import (
 
 _LOGGER = logging.getLogger(__name__)
 
-PairingOperation = Literal["pair", "replace", "repair", "reverify"]
+PairingOperation = Literal["pair", "replace", "repair", "restore", "reverify"]
+
+_CONF_RESTORE_COMPATIBILITY_CACHE = "restore_compatibility_cache"
 
 _PAIRING_PROGRESS_ACTIONS: dict[PairingOperation, str] = {
     "pair": "pairing",
     "replace": "replacing_bond",
     "repair": "repairing_compatibility",
+    "restore": "restoring_compatibility",
     "reverify": "verifying_service",
 }
 
@@ -65,6 +69,7 @@ _PAIRING_FORM_STEPS: dict[PairingOperation, str] = {
     "pair": "bluetooth_confirm",
     "replace": "replace_bond",
     "repair": "compatibility_repair",
+    "restore": "compatibility_wake",
     "reverify": "service_pending",
 }
 
@@ -171,11 +176,13 @@ class BluetoothHidRemoteConfigFlow(ConfigFlow, domain=DOMAIN):
         if self._discovery is None:
             return self.async_abort(reason="device_not_found")
         if user_input is not None:
+            if user_input.get(_CONF_RESTORE_COMPATIBILITY_CACHE, False):
+                return await self._async_start_pairing("restore")
             return await self._async_start_pairing("reverify")
 
-        self._set_confirm_only()
         return self.async_show_form(
             step_id="compatibility_wake",
+            data_schema=self._compatibility_wake_schema(),
             description_placeholders=self.context["title_placeholders"],
         )
 
@@ -193,6 +200,10 @@ class BluetoothHidRemoteConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
             elif operation == "repair":
                 pairing_coro = async_install_ar_gatt_cache(
+                    self.hass, self._discovery.address
+                )
+            elif operation == "restore":
+                pairing_coro = async_restore_ar_gatt_cache(
                     self.hass, self._discovery.address
                 )
             else:
@@ -253,6 +264,9 @@ class BluetoothHidRemoteConfigFlow(ConfigFlow, domain=DOMAIN):
         if error is None and operation == "repair":
             self._compatibility_repair_applied = True
             return await self.async_step_compatibility_wake()
+        if error is None and operation == "restore":
+            self._compatibility_repair_applied = False
+            return self.async_abort(reason="compatibility_cache_restored")
         if error is None:
             return self.async_create_entry(
                 title=self._discovery.name,
@@ -276,7 +290,11 @@ class BluetoothHidRemoteConfigFlow(ConfigFlow, domain=DOMAIN):
         if isinstance(error, PairingStaleBondError) and operation != "replace":
             return await self.async_step_replace_bond()
 
-        error_key = self._pairing_error_key(error)
+        error_key = (
+            "compatibility_restore_failed"
+            if operation == "restore"
+            else self._pairing_error_key(error)
+        )
         self._log_pairing_error(error, error_key)
         form_step = _PAIRING_FORM_STEPS[operation]
         if operation == "reverify" and self._compatibility_repair_applied:
@@ -316,12 +334,24 @@ class BluetoothHidRemoteConfigFlow(ConfigFlow, domain=DOMAIN):
 
     def _show_pairing_form(self, step_id: str, error: str) -> ConfigFlowResult:
         """Return to the originating confirmation form with a visible error."""
+        if step_id == "compatibility_wake":
+            return self.async_show_form(
+                step_id=step_id,
+                data_schema=self._compatibility_wake_schema(),
+                description_placeholders=self.context["title_placeholders"],
+                errors={"base": error},
+            )
         self._set_confirm_only()
         return self.async_show_form(
             step_id=step_id,
             description_placeholders=self.context["title_placeholders"],
             errors={"base": error},
         )
+
+    @staticmethod
+    def _compatibility_wake_schema() -> vol.Schema:
+        """Allow verification retries or an explicit cache rollback."""
+        return vol.Schema({vol.Optional(_CONF_RESTORE_COMPATIBILITY_CACHE): bool})
 
     async def _async_direct_discoveries(
         self,
@@ -339,6 +369,11 @@ class BluetoothHidRemoteConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Select a currently visible, directly attached BLE HOGP remote."""
+        if user_input is None:
+            # AUTO-mode local adapters normally remain passive until a client asks
+            # for an active scan.  ESPHome proxies may otherwise win discovery
+            # while a fresh, unpaired remote never gets a local BlueZ Device1 path.
+            await bluetooth.async_request_active_scan(self.hass, duration=5.0)
         discoveries = await self._async_direct_discoveries()
         if user_input is not None:
             address = user_input[CONF_ADDRESS]

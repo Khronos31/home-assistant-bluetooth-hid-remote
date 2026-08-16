@@ -3,7 +3,7 @@
 import asyncio
 import sys
 from types import ModuleType, SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -23,6 +23,7 @@ from homeassistant.components.assist_satellite.entity import (  # noqa: E402
 
 from custom_components.bluetooth_hid_remote.assist_satellite import (  # noqa: E402
     BluetoothHidRemoteAssistSatellite,
+    async_setup_entry,
 )
 from custom_components.bluetooth_hid_remote.const import (  # noqa: E402
     CONF_VOICE_RESPONSE_PLAYER,
@@ -59,6 +60,43 @@ def _new_entity(options: dict | None = None):
     entity = BluetoothHidRemoteAssistSatellite(entry)
     entity.hass = SimpleNamespace(loop=asyncio.get_running_loop())
     return entity
+
+
+@pytest.mark.asyncio
+async def test_voice_entity_is_added_after_late_capability_discovery() -> None:
+    """A sleeping remote can expose Assist after its Report Map is read."""
+    listener = None
+
+    class Manager:
+        supports_voice = False
+        address = "00:11:22:33:44:55"
+        name = "Remote"
+
+        def async_add_voice_support_listener(self, new_listener):
+            nonlocal listener
+            listener = new_listener
+            return Mock()
+
+    manager = Manager()
+    entry = SimpleNamespace(
+        runtime_data=manager,
+        async_on_unload=Mock(),
+    )
+    async_add_entities = Mock()
+
+    await async_setup_entry(object(), entry, async_add_entities)
+    async_add_entities.assert_not_called()
+
+    manager.supports_voice = True
+    assert listener is not None
+    listener()
+    listener()
+
+    async_add_entities.assert_called_once()
+    assert isinstance(
+        async_add_entities.call_args.args[0][0],
+        BluetoothHidRemoteAssistSatellite,
+    )
 
 
 @pytest.mark.asyncio

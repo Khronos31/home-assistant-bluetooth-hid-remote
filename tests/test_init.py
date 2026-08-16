@@ -272,6 +272,49 @@ async def test_new_entries_default_to_android_tv(
 
 
 @pytest.mark.asyncio
+async def test_manual_discovery_requests_active_scan_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opening discovery wakes an AUTO-mode local adapter before reading cache."""
+    flow = BluetoothHidRemoteConfigFlow()
+    flow.hass = SimpleNamespace()
+    request_scan = AsyncMock()
+    flow._async_direct_discoveries = AsyncMock(return_value={})
+    flow.async_abort = lambda **kwargs: kwargs
+    monkeypatch.setattr(
+        "custom_components.bluetooth_hid_remote.config_flow.bluetooth.async_request_active_scan",
+        request_scan,
+    )
+
+    result = await flow.async_step_user()
+
+    request_scan.assert_awaited_once_with(flow.hass, duration=5.0)
+    flow._async_direct_discoveries.assert_awaited_once_with()
+    assert result == {"reason": "no_devices_found"}
+
+
+@pytest.mark.asyncio
+async def test_manual_discovery_submission_reuses_scan_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Submitting a selected remote does not add a second scan delay."""
+    flow = BluetoothHidRemoteConfigFlow()
+    flow.hass = SimpleNamespace()
+    request_scan = AsyncMock()
+    flow._async_direct_discoveries = AsyncMock(return_value={})
+    flow.async_show_form = lambda **kwargs: kwargs
+    monkeypatch.setattr(
+        "custom_components.bluetooth_hid_remote.config_flow.bluetooth.async_request_active_scan",
+        request_scan,
+    )
+
+    result = await flow.async_step_user({CONF_ADDRESS: "00:11:22:33:44:55"})
+
+    request_scan.assert_not_awaited()
+    assert result["errors"] == {"base": "device_not_found"}
+
+
+@pytest.mark.asyncio
 async def test_pairing_error_stays_in_confirmation_flow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -385,6 +428,31 @@ async def test_ar_cache_repair_failure_remains_on_confirmation(
     assert result["type"] == "form"
     assert result["step_id"] == "compatibility_repair"
     assert result["errors"] == {"base": "compatibility_repair_failed"}
+
+
+@pytest.mark.asyncio
+async def test_ar_cache_repair_can_be_explicitly_restored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wake step exposes a rollback that aborts without an entry."""
+    restore = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.bluetooth_hid_remote.config_flow.async_restore_ar_gatt_cache",
+        restore,
+    )
+    flow = _new_pairing_flow()
+    flow._compatibility_repair_applied = True
+
+    progress = await flow.async_step_compatibility_wake(
+        {"restore_compatibility_cache": True}
+    )
+    assert progress["progress_action"] == "restoring_compatibility"
+    result = await _finish_pairing_progress(flow)
+
+    assert result["type"] == "abort"
+    assert result["reason"] == "compatibility_cache_restored"
+    restore.assert_awaited_once_with(flow.hass, "00:11:22:33:44:55")
+    assert flow._compatibility_repair_applied is False
 
 
 @pytest.mark.asyncio

@@ -56,10 +56,22 @@ async def async_setup_entry(
     entry: BluetoothHidRemoteConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up a satellite only when the HID descriptor supports voice."""
+    """Set up a satellite when static metadata proves voice support."""
     manager = entry.runtime_data
-    if manager.supports_voice:
+    entity_added = False
+
+    @callback
+    def async_add_if_supported() -> None:
+        nonlocal entity_added
+        if entity_added or not manager.supports_voice:
+            return
+        entity_added = True
         async_add_entities([BluetoothHidRemoteAssistSatellite(entry)])
+
+    entry.async_on_unload(
+        manager.async_add_voice_support_listener(async_add_if_supported)
+    )
+    async_add_if_supported()
 
 
 class BluetoothHidRemoteAssistSatellite(assist_satellite.AssistSatelliteEntity):

@@ -20,6 +20,7 @@ HID_REPORT_UUID: Final = "00002a4d-0000-1000-8000-00805f9b34fb"
 HID_REPORT_REFERENCE_UUID: Final = "00002908-0000-1000-8000-00805f9b34fb"
 
 HID_REPORT_TYPE_INPUT: Final = 1
+HID_REPORT_TYPE_OUTPUT: Final = 2
 
 # Android TV Voice (ATVV) GATT service used by genuine Google TV remotes.
 # Audio remains in a bounded in-memory Assist session and is never entity state.

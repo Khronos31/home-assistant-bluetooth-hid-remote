@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-SOURCE=$1
+MODE=$1
 ADAPTER=$2
 DEVICE=$3
 
@@ -16,9 +16,9 @@ is_address() {
     esac
 }
 
-if ! is_address "$ADAPTER" || ! is_address "$DEVICE"; then
-        echo "Invalid Bluetooth address" >&2
-        exit 2
+if test "$MODE" != "restore" || ! is_address "$ADAPTER" || ! is_address "$DEVICE"; then
+    echo "Invalid restore request" >&2
+    exit 2
 fi
 
 DEST_DIR="/var/lib/bluetooth/$ADAPTER/cache"
@@ -26,18 +26,15 @@ DEST="$DEST_DIR/$DEVICE"
 BACKUP="$DEST.bluetooth-hid-remote.bak"
 MISSING="$DEST.bluetooth-hid-remote.missing"
 
-test -f "$SOURCE"
 test -d "$DEST_DIR"
 
-if ! test -e "$BACKUP" && ! test -e "$MISSING"; then
-    if test -f "$DEST"; then
-        cp "$DEST" "$BACKUP"
-        chmod 600 "$BACKUP"
-    else
-        : > "$MISSING"
-        chmod 600 "$MISSING"
-    fi
+if test -f "$BACKUP"; then
+    cp "$BACKUP" "$DEST"
+    chmod 600 "$DEST"
+    rm -f "$BACKUP" "$MISSING"
+elif test -f "$MISSING"; then
+    rm -f "$DEST" "$MISSING"
+else
+    echo "No Bluetooth HID Remote cache snapshot exists" >&2
+    exit 3
 fi
-
-cp "$SOURCE" "$DEST"
-chmod 600 "$DEST"

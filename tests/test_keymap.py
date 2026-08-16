@@ -22,6 +22,10 @@ from custom_components.bluetooth_hid_remote.keymap import (
         (0x07, 0x66, 26, "POWER"),
         (0x0C, 0x8D, 172, "GUIDE"),
         (0x0C, 0x223, 3, "HOME"),
+        (0xFF, 0x00A1, 289, "VIDEO_APP_1"),
+        (0xFF, 0x00A2, 290, "VIDEO_APP_2"),
+        (0xFF, 0x00A3, 291, "VIDEO_APP_3"),
+        (0xFF, 0x00A4, 292, "VIDEO_APP_4"),
     ],
 )
 def test_android_tv_profile_uses_android_keyevent_constants(
@@ -98,7 +102,7 @@ def test_android_tv_profile_does_not_invent_unmapped_linux_compatibility() -> No
         (0x0C, 0x000D, 174, "BOOKMARK"),
     ],
 )
-def test_google_tv_profile_uses_observed_genuine_remote_button_enum(
+def test_google_tv_profile_uses_observed_remote_button_enum(
     page: int, usage_id: int, code: int, name: str
 ) -> None:
     """The public Google profile maps all fifteen observed physical buttons."""

@@ -317,13 +317,20 @@ _ANDROID_TV_USAGE_NAMES: dict[UsageKey, str] = {
     (0x0C, 0x223): "HOME",
     (0x0C, 0x224): "BACK",
     (0x0C, 0x225): "FORWARD",
+    # Both the genuine Fire TV remote and the tested compatible AR expose
+    # their four branded app buttons through this vendor page.  Keep the
+    # public names service-neutral while preserving the raw HID identity.
+    (0xFF, 0x00A1): "VIDEO_APP_1",
+    (0xFF, 0x00A2): "VIDEO_APP_2",
+    (0xFF, 0x00A3): "VIDEO_APP_3",
+    (0xFF, 0x00A4): "VIDEO_APP_4",
 }
 
 
-# The genuine Google TV Remote uses these low usage IDs as its button enum
-# instead of their nominal HID Usage Tables meanings. Keep this override in a
-# device-family profile so the generic HID and Android TV profiles remain
-# standards-based. Every entry below was observed on physical hardware.
+# The genuine and tested compatible Google TV remotes use these low usage IDs
+# as their button enum instead of their nominal HID Usage Tables meanings. Keep
+# this override in a device-family profile so the generic HID and Android TV
+# profiles remain standards-based. Every entry below was observed on hardware.
 _GOOGLE_TV_USAGE_NAMES: dict[UsageKey, str] = {
     (0x0C, 0x0001): "DPAD_UP",
     (0x0C, 0x0002): "DPAD_DOWN",

@@ -2,7 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from bleak.backends.bluezdbus import defs
@@ -16,6 +16,7 @@ from custom_components.bluetooth_hid_remote.const import (
     EVENT_KEY_RELEASED,
     HID_REPORT_MAP_UUID,
     HID_REPORT_REFERENCE_UUID,
+    HID_REPORT_TYPE_OUTPUT,
     HID_REPORT_UUID,
 )
 from custom_components.bluetooth_hid_remote.hid import HidReportDecoder, HidUsage
@@ -28,6 +29,11 @@ from custom_components.bluetooth_hid_remote.manager import (
     parse_report_reference,
 )
 from custom_components.bluetooth_hid_remote.voice import (
+    FIRE_TV_VOICE_START_COMMAND,
+    FIRE_TV_VOICE_STOP_COMMAND,
+    VOICE_CONTROL_OUTPUT_REPORT_ID,
+    VOICE_START_COMMAND,
+    VOICE_STOP_COMMAND,
     HidVoicePacket,
     PcmVoicePacket,
     VoicePacket,
@@ -68,6 +74,62 @@ def test_bluez_path_falls_back_to_the_direct_adapter_by_address() -> None:
     assert bluez_device_path_from_address(manager, "00:00:00:00:00:00") is None
 
 
+def test_late_voice_capability_notifies_registered_platforms_once_per_probe() -> None:
+    """Metadata discovery wakes platforms that started before the remote."""
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager._voice_support_listeners = set()
+    manager._report_decoder = None
+    manager._atvv_tx_path = None
+    manager._atvv_paths = {}
+    listener = Mock()
+    unsubscribe = manager.async_add_voice_support_listener(listener)
+
+    manager._async_notify_voice_support_available()
+    listener.assert_not_called()
+
+    manager._report_decoder = HidReportDecoder.from_report_map(
+        bytes.fromhex("06ff00090085f095507508150025ff8100")
+    )
+    manager._async_notify_voice_support_available()
+    listener.assert_called_once_with()
+
+    unsubscribe()
+    manager._async_notify_voice_support_available()
+    listener.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_failed_metadata_probe_retries_without_a_new_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BlueZ becoming ready late is recovered on the same connection."""
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    manager.connected = True
+    manager._stopping = False
+    manager._metadata_retry_task = None
+    manager.hass = object()
+    manager._async_map_report_characteristics = AsyncMock(side_effect=[False, True])
+    manager.entry = SimpleNamespace(
+        async_create_background_task=lambda _hass, coro, **_kwargs: asyncio.create_task(
+            coro
+        )
+    )
+    monkeypatch.setattr(
+        "custom_components.bluetooth_hid_remote.manager._METADATA_RETRY_DELAYS",
+        (0.0,),
+    )
+
+    await manager._async_map_report_characteristics_then_retry()
+    retry_task = manager._metadata_retry_task
+    assert retry_task is not None
+    await retry_task
+
+    assert manager.connected
+    assert manager._async_map_report_characteristics.await_count == 2
+    assert manager._metadata_retry_task is None
+
+
 def test_bluez_connection_only_updates_passive_state() -> None:
     """A BlueZ connection is observed without queuing a client connection."""
     manager = object.__new__(BluetoothHidRemoteManager)
@@ -83,6 +145,7 @@ def test_bluez_connection_only_updates_passive_state() -> None:
     manager._active_report_paths = {"path"}
     manager._notification_paths = {"path"}
     manager._voice_listeners = set()
+    manager._metadata_retry_task = None
     manager.last_voice_packet = None
     manager._stopping = False
 
@@ -302,6 +365,282 @@ async def test_hid_metadata_is_loaded_from_existing_bluez_connection() -> None:
     assert manager._report_decoder.decode(1, bytes.fromhex("580000")) == (
         HidUsage(0x07, 0x58, "Keypad ENTER"),
     )
+
+
+@pytest.mark.asyncio
+async def test_hid_output_report_is_mapped_by_descriptor() -> None:
+    """A writable F2 report is selected by metadata, never a fixed handle."""
+    report_map_path = "/service004f/char0055"
+    output_path = "/service004f/char006d"
+    output_reference_path = f"{output_path}/desc006f"
+    report_map = bytes.fromhex(
+        "06ff000900a10185f095507508150025ff810085f29501750809009102c0"
+    )
+
+    class Bus:
+        connected = True
+
+        async def call(self, message):
+            values = {
+                report_map_path: report_map,
+                output_reference_path: bytes(
+                    [VOICE_CONTROL_OUTPUT_REPORT_ID, HID_REPORT_TYPE_OUTPUT]
+                ),
+            }
+            return SimpleNamespace(
+                message_type=MessageType.METHOD_RETURN,
+                error_name=None,
+                body=[values[message.path]],
+            )
+
+    report_map_characteristic = SimpleNamespace(
+        uuid=HID_REPORT_MAP_UUID,
+        obj=(report_map_path, {}),
+        descriptors=[],
+    )
+    output_characteristic = SimpleNamespace(
+        uuid=HID_REPORT_UUID,
+        obj=(output_path, {}),
+        handle=0x6D,
+        properties=["read", "write"],
+        descriptors=[
+            SimpleNamespace(
+                uuid=HID_REPORT_REFERENCE_UUID,
+                obj=(output_reference_path, {}),
+            )
+        ],
+    )
+    service = SimpleNamespace(
+        characteristics=[report_map_characteristic, output_characteristic],
+        get_characteristic=lambda uuid: (
+            report_map_characteristic if uuid == HID_REPORT_MAP_UUID else None
+        ),
+    )
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    manager.connected = True
+    manager._stopping = False
+    manager._bluez_manager = SimpleNamespace(_bus=Bus())
+    manager._ignored_value_paths = set()
+    manager._report_decoder = None
+    manager.report_map = None
+
+    await manager._async_load_hid_metadata(service, {})
+
+    assert manager._hid_output_report_paths == {
+        VOICE_CONTROL_OUTPUT_REPORT_ID: (output_path, "request")
+    }
+
+
+@pytest.mark.asyncio
+async def test_hid_output_command_uses_descriptor_path_and_write_type() -> None:
+    """The BSA start command is written as one byte to the mapped F2 report."""
+
+    class Bus:
+        connected = True
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def call(self, message):
+            self.calls.append(message)
+            return SimpleNamespace(
+                message_type=MessageType.METHOD_RETURN,
+                error_name=None,
+            )
+
+    bus = Bus()
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    manager.connected = True
+    manager._stopping = False
+    manager._bluez_manager = SimpleNamespace(_bus=bus)
+    manager._hid_output_report_paths = {
+        VOICE_CONTROL_OUTPUT_REPORT_ID: ("/service004f/char006d", "request")
+    }
+
+    await manager._async_write_hid_output(
+        VOICE_CONTROL_OUTPUT_REPORT_ID, VOICE_START_COMMAND, "VOICE_START"
+    )
+
+    message = bus.calls[0]
+    assert message.path == "/service004f/char006d"
+    assert message.member == "WriteValue"
+    assert message.signature == "aya{sv}"
+    assert message.body[0] == VOICE_START_COMMAND
+    assert message.body[1]["type"].value == "request"
+
+
+@pytest.mark.asyncio
+async def test_hid_output_command_prefers_address_scoped_hidraw() -> None:
+    """The kernel HID path is used before a direct GATT write."""
+
+    class Bus:
+        connected = True
+        call = AsyncMock()
+
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    manager.connected = True
+    manager._stopping = False
+    manager._bluez_manager = SimpleNamespace(_bus=Bus())
+    manager._hid_output_report_paths = {
+        VOICE_CONTROL_OUTPUT_REPORT_ID: ("/service004f/char006d", "request")
+    }
+    manager.hidraw_writer = SimpleNamespace(
+        async_write=AsyncMock(return_value="/dev/hidraw12")
+    )
+
+    written = await manager._async_write_hid_output(
+        VOICE_CONTROL_OUTPUT_REPORT_ID, VOICE_START_COMMAND, "VOICE_START"
+    )
+
+    assert written is True
+    manager.hidraw_writer.async_write.assert_awaited_once_with(
+        VOICE_CONTROL_OUTPUT_REPORT_ID, VOICE_START_COMMAND
+    )
+    manager._bluez_manager._bus.call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_hid_voice_fallback_writes_start_then_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A remote without native F0 packets receives the BSA control pair."""
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    manager.connected = True
+    manager._stopping = False
+    manager._hid_voice_packet_seen = False
+    manager._hid_voice_button_pressed = True
+    manager._hid_voice_start_task = None
+    manager._hid_voice_command_active = False
+    manager._async_write_hid_output = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "custom_components.bluetooth_hid_remote.manager._HID_VOICE_FALLBACK_DELAY",
+        0.0,
+    )
+
+    await manager._async_start_hid_voice_command()
+    await manager._async_stop_hid_voice_command()
+
+    assert manager._async_write_hid_output.await_args_list == [
+        ((VOICE_CONTROL_OUTPUT_REPORT_ID, VOICE_START_COMMAND, "VOICE_START"), {}),
+        ((VOICE_CONTROL_OUTPUT_REPORT_ID, VOICE_STOP_COMMAND, "VOICE_STOP"), {}),
+    ]
+    assert manager._hid_voice_command_active is False
+
+
+@pytest.mark.asyncio
+async def test_genuine_fire_tv_voice_uses_lab126_audio_state_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lab126 product 042F receives the genuine Fire TV 1/0 control pair."""
+    device_path = "/org/bluez/hci0/dev_00_11_22_33_44_55"
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    manager.connected = True
+    manager._stopping = False
+    manager._device_path = device_path
+    manager._bluez_manager = SimpleNamespace(
+        _properties={device_path: {defs.DEVICE_INTERFACE: {}}}
+    )
+    manager.hidraw_writer = SimpleNamespace(
+        async_hid_id=AsyncMock(return_value="0005:00000171:0000042F")
+    )
+    manager._hid_voice_packet_seen = False
+    manager._hid_voice_button_pressed = True
+    manager._hid_voice_start_task = None
+    manager._hid_voice_command_active = False
+    manager._async_write_hid_output = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "custom_components.bluetooth_hid_remote.manager._HID_VOICE_FALLBACK_DELAY",
+        0.0,
+    )
+
+    await manager._async_start_hid_voice_command()
+    await manager._async_stop_hid_voice_command()
+
+    assert manager._async_write_hid_output.await_args_list == [
+        (
+            (
+                VOICE_CONTROL_OUTPUT_REPORT_ID,
+                FIRE_TV_VOICE_START_COMMAND,
+                "VOICE_START",
+            ),
+            {},
+        ),
+        (
+            (
+                VOICE_CONTROL_OUTPUT_REPORT_ID,
+                FIRE_TV_VOICE_STOP_COMMAND,
+                "VOICE_STOP",
+            ),
+            {},
+        ),
+    ]
+    assert manager.hidraw_writer.async_hid_id.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_native_hid_voice_skips_fallback_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A self-starting compatible remote never receives the BSA fallback."""
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    manager.connected = True
+    manager._stopping = False
+    manager._hid_voice_packet_seen = True
+    manager._hid_voice_button_pressed = True
+    manager._hid_voice_start_task = None
+    manager._hid_voice_command_active = False
+    manager._async_write_hid_output = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.bluetooth_hid_remote.manager._HID_VOICE_FALLBACK_DELAY",
+        0.0,
+    )
+
+    await manager._async_start_hid_voice_command()
+
+    manager._async_write_hid_output.assert_not_awaited()
+    assert manager._hid_voice_command_active is False
+
+
+@pytest.mark.asyncio
+async def test_hid_voice_release_during_start_is_stopped_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A release racing the F2 start write cannot leave capture running."""
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    manager.connected = True
+    manager._stopping = False
+    manager._hid_voice_packet_seen = False
+    manager._hid_voice_button_pressed = True
+    manager._hid_voice_start_task = None
+    manager._hid_voice_command_active = False
+
+    async def write_output(report_id: int, value: bytes, operation: str) -> bool:
+        if operation == "VOICE_START":
+            manager._hid_voice_button_pressed = False
+        writes.append((report_id, value, operation))
+        return True
+
+    writes: list[tuple[int, bytes, str]] = []
+    manager._async_write_hid_output = write_output
+    monkeypatch.setattr(
+        "custom_components.bluetooth_hid_remote.manager._HID_VOICE_FALLBACK_DELAY",
+        0.0,
+    )
+
+    await manager._async_start_hid_voice_command()
+
+    assert writes == [
+        (VOICE_CONTROL_OUTPUT_REPORT_ID, VOICE_START_COMMAND, "VOICE_START"),
+        (VOICE_CONTROL_OUTPUT_REPORT_ID, VOICE_STOP_COMMAND, "VOICE_STOP"),
+    ]
+    assert manager._hid_voice_command_active is False
 
 
 def test_unmapped_bluez_value_is_published_with_path_handle() -> None:

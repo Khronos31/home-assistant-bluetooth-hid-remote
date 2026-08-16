@@ -42,9 +42,9 @@ is not intended to become a general-purpose Bluetooth input integration:
   may allow one to connect, but pointer reports, buttons, motion, and resulting
   HAOS behavior are unsupported.
 
-Voice support is planned for v0.2.0 against four separate physical test
-devices: genuine and compatible Fire TV remotes, and genuine and compatible
-Google TV remotes. A compatible remote is treated as an independent protocol
+Push-to-talk Assist is supported on four separately tested physical devices:
+genuine and compatible Fire TV remotes, and genuine and compatible Google TV
+remotes. A compatible remote is treated as an independent protocol
 implementation, not assumed equivalent from its appearance.
 
 ## Key profiles and event data
@@ -60,18 +60,21 @@ never discard the identity reported by the hardware.
 
 The built-in profiles are:
 
-- **HID** (default for new entries): numeric HID Usage ID and a normalized HID
-  Usage name. This never claims that a number is a Linux evdev or Android code.
+- **HID**: numeric HID Usage ID and a normalized HID Usage name. This never
+  claims that a number is a Linux evdev or Android code.
 - **Android TV / Fire TV**: Android `KeyEvent` names and numeric constants for
   common TV remote keys. It also follows Android's real Linux HID compatibility
   path for the legacy Keyboard/Keypad usages used by some remotes; for example,
-  HID `0x0007:0x00F1` becomes Android `BACK`/`4`. Intermediate Linux input codes
-  are never exposed. Unmapped usages are explicit as `UNKNOWN`/`0` while the
-  HID fields remain available.
+  HID `0x0007:0x00F1` becomes Android `BACK`/`4`. The four vendor-page app
+  buttons confirmed on both the genuine Fire TV remote and compatible AR map
+  to service-neutral `VIDEO_APP_1` through `VIDEO_APP_4`. Intermediate Linux
+  input codes are never exposed. Unmapped usages are explicit as `UNKNOWN`/`0`
+  while the HID fields remain available. This is the default for new entries.
 - **Google TV**: extends the Android key namespace with the proprietary
-  low-numbered HID usages observed on the genuine Google TV Remote. Its fifteen
-  verified buttons include navigation, volume, voice assist, app shortcuts,
-  power, and favorites. Unobserved usages retain the Android TV fallback.
+  low-numbered HID usages observed identically on the genuine and tested
+  compatible Google TV remotes. Its fifteen verified buttons include
+  navigation, volume, voice assist, app shortcuts, power, and favorites.
+  Unobserved usages retain the Android TV fallback.
 
 Optional custom YAML profiles remain supported for unusual hardware and local
 overrides. They are an advanced compatibility escape hatch, not required for
@@ -136,10 +139,6 @@ profiles:
     namespace: android
     mappings:
       "07:0058": DPAD_CENTER
-      "00FF:00A1": VIDEO_APP_1
-      "00FF:00A2": VIDEO_APP_2
-      "00FF:00A3": VIDEO_APP_3
-      "00FF:00A4": VIDEO_APP_4
       "0C:008D": GUIDE
       "0C:0223": HOME
 ```
@@ -151,16 +150,40 @@ integration rejects Android name/code mismatches. HID custom profiles inherit
 the comprehensive HID names and may override a display name while retaining
 the numeric HID Usage ID.
 
-Device-specific branded buttons belong in a custom profile rather than the
-built-in Android TV profile. For example, one tested remote reports its four
-streaming buttons on vendor-defined Usage Page `0x00FF`, with Usage IDs
-`0x00A1` through `0x00A4`; the example above gives them Android's
-service-neutral `VIDEO_APP_1` through `VIDEO_APP_4` identities without baking
-service brands into the integration.
+Device-specific branded buttons generally belong in a custom profile. The
+exception currently promoted into Android TV / Fire TV is vendor Usage Page
+`0x00FF`, Usage IDs `0x00A1` through `0x00A4`: identical reports were verified
+on the genuine Fire TV remote and the separately manufactured compatible AR.
+They intentionally use Android's service-neutral `VIDEO_APP_1` through
+`VIDEO_APP_4` identities rather than baking streaming-service brands into the
+integration.
+
+## Voice assistant
+
+A voice-capable remote creates an **Assist** entity and an **Assist pipeline**
+select entity in addition to its button event and diagnostic entities. Choose
+the pipeline on that select entity. In the integration's Configure dialog,
+**Voice assistant** can optionally select a `media_player` for spoken replies;
+leaving it empty runs STT and intent handling without generating TTS.
+
+- On Fire TV remotes, hold the Search/voice button while speaking and release
+  it to submit the utterance. Genuine Fire TV hardware and the tested `AR`
+  compatible remote use independently verified HOGP/Opus control behavior.
+- On Google TV remotes, press Search/voice once and speak during the bounded
+  five-second ATVV capture. Genuine and tested compatible remotes use the same
+  verified ATVV transport.
+
+Audio is kept only in bounded memory for the active utterance, decoded locally,
+and sent to the selected Home Assistant Assist pipeline starting at STT. The
+integration does not persist raw recordings and does not implement a wake word.
+Capture also stops on transport end, the remote's release where applicable, or
+a 15-second safety timeout. If the Assist entities do not appear, BlueZ did not
+expose a supported voice transport for that device.
 
 ## Installation
 
-Add this repository to HACS as a custom **Integration** repository. Tagged
+Home Assistant **2026.8.1 or newer** is required. Add this repository to HACS
+as a custom **Integration** repository. Tagged
 releases are installed through HACS in the usual way; `main` may contain
 unreleased hardware-validation work.
 
@@ -191,20 +214,27 @@ service available. A failed recovery leads to the separate, explicit bond
 replacement confirmation rather than deleting the bond automatically.
 
 One tested remote identifies itself as `AR`, appearance `0x0180`, advertises
-HOGP, but returns a malformed characteristic-discovery response that BlueZ
-cannot parse. After this exact device is paired and bonded, the flow offers a
-separate compatibility confirmation. On HAOS only, accepting it briefly stops
-the host Bluetooth service, backs up and replaces only that device's non-secret
-GATT cache with the verified table bundled in this integration, then restarts
-Bluetooth and verifies the real HOGP objects. The device's bond keys are stored
-separately and are neither read nor modified. The repair is never offered to a
-generic keyboard, mouse, differently named remote, or unbonded device.
+HOGP, and carries the observed manufacturer/product fingerprint
+`0x0171:041e`, but returns a malformed characteristic-discovery response that
+BlueZ cannot parse. After this exact device is paired and bonded, the flow
+offers a separate compatibility confirmation. On HAOS only, accepting it
+briefly stops the host Bluetooth service, snapshots and replaces only that
+device's non-secret GATT cache with the verified table bundled in this
+integration, then restarts Bluetooth and verifies the real HOGP objects. The
+device's bond keys are stored separately and are neither read nor modified.
+The repair is never offered unless the name, appearance, advertised HOGP UUID,
+manufacturer/product fingerprint, and bond state all match.
+
+If service verification still fails, the same recovery screen offers an
+explicit rollback. It restores the exact pre-repair cache snapshot (or removes
+the newly created cache when none existed) and aborts setup without creating an
+integration entry.
 
 This compatibility action temporarily disconnects every host-Bluetooth device.
 It is intentionally not automatic, does not change BlueZ configuration or its
 built-in `input-hog` profile, and is unsupported outside Home Assistant OS.
 
-## Console input protection
+## Best-effort console input protection
 
 BlueZ's built-in HOGP profile normally creates Linux `/dev/input/event*`
 devices. Without exclusive ownership, key presses can reach the active HAOS
@@ -221,6 +251,14 @@ The integration continuously reconciles node creation and removal because
 BlueZ can assign new event numbers after a reconnect. Entry unload, reload,
 setup failure, and Core shutdown close every descriptor; the kernel also
 releases ownership if Core exits unexpectedly.
+
+This mechanism is deliberately fail-open: a remote entry can still provide HA
+events when an event node cannot be opened or `EVIOCGRAB` fails. In that case
+the diagnostic sensor is off and its attributes contain the exact failed node
+and error. A newly recreated node is discovered by a 250 ms reconciliation
+loop, so a short reconnect window can exist before the grab is acquired. Do
+not treat this HACS integration as an absolute guarantee that no keystroke can
+reach the host console.
 
 This protection begins when Home Assistant Core loads the config entry. It
 cannot cover the earlier HAOS boot interval before Core and the integration are

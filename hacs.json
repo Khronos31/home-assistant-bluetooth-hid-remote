@@ -1,4 +1,5 @@
 {
+  "homeassistant": "2026.8.1",
   "name": "Bluetooth HID Remote",
   "render_readme": true
 }

@@ -1,6 +1,7 @@
 {
   "config": {
     "abort": {
+      "compatibility_cache_restored": "元のBlueZキャッシュを復元しました。統合エントリは作成していません。",
       "device_not_found": "Bluetooth HIDリモコンが見つからなくなりました。",
       "no_devices_found": "接続可能なBLE HID-over-GATTリモコンが見つかりません。",
       "not_direct": "このリモコンはBluetoothプロキシ経由でのみ見えています。ペアリングにはHome Assistant OSへ直接接続したBluetoothアダプターが必要です。",
@@ -10,6 +11,7 @@
       "device_not_found": "Home Assistantへ直接接続したBluetoothアダプターからリモコンが見えなくなりました。",
       "compatibility_repair_failed": "AR互換キャッシュを適用できませんでした。Bluetoothサービスは再起動済みです。統合ログを確認してください。",
       "compatibility_repair_unsupported": "このホストまたはリモコンは、検証済みAR互換修復の対象と一致しません。",
+      "compatibility_restore_failed": "元のAR互換キャッシュを復元できませんでした。Bluetoothサービスは再起動済みです。統合ログを確認してください。",
       "pairing_failed": "Bluetoothペアリングに失敗しました。リモコンをもう一度ペアリングモードにして再試行してください。",
       "pairing_rejected": "リモコンまたはBlueZがペアリングを拒否しました。リモコンをもう一度ペアリングモードにして再試行してください。",
       "pairing_timeout": "Bluetoothペアリングが時間切れになりました。リモコンをアダプターへ近づけ、ペアリングモードのまま再試行してください。",
@@ -19,6 +21,7 @@
     "progress": {
       "pairing": "{name}をHome Assistantとペアリングしています。リモコンを近くに置き、ペアリングモードを維持してください。",
       "repairing_compatibility": "検証済みAR互換キャッシュを適用しています。Bluetooth機器は一時的に切断されます。",
+      "restoring_compatibility": "元のAR Bluetoothキャッシュを復元しています。Bluetooth機器は一時的に切断されます。",
       "replacing_bond": "{name}の使用できないボンドを削除して作り直しています。このリモコンだけをペアリングモードにしてください。",
       "verifying_service": "BlueZが{name}のHIDサービスを公開したか確認しています。ボタンを押してリモコンを起こしてください。"
     },
@@ -30,7 +33,10 @@
         "description": "{name}のペアリングとボンド作成は成功していますが、この検証済みARモデルはBlueZが探索できない不正なGATTテーブルを返します。続行すると、このデバイス用の既知の非機密HIDキャッシュを適用し、ホストのBluetoothサービスを短時間再起動します。ボンド鍵は読み書きせず、このデバイスのGATTキャッシュだけを退避して置換します。"
       },
       "compatibility_wake": {
-        "description": "AR互換キャッシュを適用し、Bluetoothを再起動しました。{name}の任意のボタンを押して起動し、2秒待ってから送信してHIDサービスを確認してください。リモコンのリセットや再ペアリングは不要です。"
+        "data": {
+          "restore_compatibility_cache": "元のキャッシュを復元してセットアップを中止"
+        },
+        "description": "AR互換キャッシュを適用し、Bluetoothを再起動しました。{name}の任意のボタンを押して起動し、2秒待ってから送信してHIDサービスを確認してください。リモコンのリセットや再ペアリングは不要です。検証が繰り返し失敗する場合は、復元を選ぶと修復前のキャッシュを正確に戻してセットアップを中止します。"
       },
       "replace_bond": {
         "description": "BlueZには{name}の既存ボンドがありますが、利用可能なHIDサービスを取得できません。リモコンをリセットした後によく起きます。このリモコンをペアリングモードにしてから続行してください。Home Assistantは、ここで選択したデバイスのボンドだけを削除して作り直します。"

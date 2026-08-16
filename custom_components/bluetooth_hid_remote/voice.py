@@ -11,6 +11,13 @@ from typing import Final
 VOICE_REPORT_ID: Final = 0xF0
 VOICE_PACKET_SIZE: Final = 80
 VOICE_PACKET_TOC: Final = 0xB8
+VOICE_CONTROL_OUTPUT_REPORT_ID: Final = 0xF2
+# Lab126's Fire TV kernel driver uses 1/0 for the genuine remote audio state.
+# Some compatible remotes use the BSA sample values 2/3 instead.
+FIRE_TV_VOICE_START_COMMAND: Final = bytes((0x01,))
+FIRE_TV_VOICE_STOP_COMMAND: Final = bytes((0x00,))
+VOICE_START_COMMAND: Final = bytes((0x02,))
+VOICE_STOP_COMMAND: Final = bytes((0x03,))
 VOICE_FRAME_SAMPLES_48KHZ: Final = 960
 VOICE_SAMPLE_RATE: Final = 16_000
 MAX_VOICE_PACKETS: Final = 750

@@ -15,6 +15,7 @@ from dbus_fast.signature import Variant
 from custom_components.bluetooth_hid_remote.compatibility import (
     CompatibilityRepairUnsupportedError,
     async_install_ar_gatt_cache,
+    async_restore_ar_gatt_cache,
     is_ar_cache_repair_candidate,
 )
 from custom_components.bluetooth_hid_remote.const import HID_SERVICE_UUID
@@ -26,7 +27,9 @@ DEVICE_PATH = f"{ADAPTER_PATH}/dev_{ADDRESS.replace(':', '_')}"
 UNIT_PATH = "/org/freedesktop/systemd1/unit/bluetooth_2dhid_2dcache_2eservice"
 
 
-def _manager(*, name: str = "AR") -> SimpleNamespace:
+def _manager(
+    *, name: str = "AR", manufacturer_data: bytes = bytes.fromhex("041e")
+) -> SimpleNamespace:
     return SimpleNamespace(
         _properties={
             ADAPTER_PATH: {defs.ADAPTER_INTERFACE: {"Address": ADAPTER_ADDRESS}},
@@ -36,6 +39,7 @@ def _manager(*, name: str = "AR") -> SimpleNamespace:
                     "Address": ADDRESS,
                     "Appearance": 0x0180,
                     "Bonded": True,
+                    "ManufacturerData": {0x0171: manufacturer_data},
                     "Name": name,
                     "Paired": True,
                     "UUIDs": [HID_SERVICE_UUID],
@@ -72,6 +76,12 @@ def test_ar_cache_repair_candidate_is_narrow() -> None:
     """Only the exact tested bonded AR identity enters the host repair path."""
     assert is_ar_cache_repair_candidate(_manager(), DEVICE_PATH) is True
     assert is_ar_cache_repair_candidate(_manager(name="Keyboard"), DEVICE_PATH) is False
+    assert (
+        is_ar_cache_repair_candidate(
+            _manager(manufacturer_data=bytes.fromhex("042f")), DEVICE_PATH
+        )
+        is False
+    )
 
 
 @pytest.mark.asyncio
@@ -125,3 +135,42 @@ async def test_ar_cache_repair_rejects_unrelated_hid() -> None:
         await async_install_ar_gatt_cache(
             hass, ADDRESS, manager=_manager(name="Keyboard")
         )
+
+
+@pytest.mark.asyncio
+async def test_ar_cache_restore_stops_bluez_runs_helper_and_restarts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit rollback restores only the selected remote's snapshot."""
+    bus = FakeBus()
+    wait_for_bluez = AsyncMock()
+    monkeypatch.setattr(
+        "custom_components.bluetooth_hid_remote.compatibility._async_open_system_bus",
+        AsyncMock(return_value=bus),
+    )
+    monkeypatch.setattr(
+        "custom_components.bluetooth_hid_remote.compatibility._async_wait_for_bluez",
+        wait_for_bluez,
+    )
+    config_dir = Path(__file__).parents[1]
+    hass = SimpleNamespace(config=SimpleNamespace(config_dir=str(config_dir)))
+
+    await async_restore_ar_gatt_cache(hass, ADDRESS, manager=_manager())
+
+    members = [call.member for call in bus.calls]
+    assert members == [
+        "StopUnit",
+        "StartTransientUnit",
+        "GetUnit",
+        "Get",
+        "StopUnit",
+        "StartUnit",
+    ]
+    helper_call = bus.calls[1]
+    exec_start = dict(helper_call.body[2])["ExecStart"].value[0]
+    assert exec_start[0] == "/bin/sh"
+    assert exec_start[1][-3:] == ["restore", ADAPTER_ADDRESS, ADDRESS]
+    assert exec_start[1][1].endswith("/compatibility/restore-bluez-cache.sh")
+    assert wait_for_bluez.await_args_list[0].kwargs == {"running": False}
+    assert wait_for_bluez.await_args_list[1].kwargs == {"running": True}
+    assert bus.disconnected is True

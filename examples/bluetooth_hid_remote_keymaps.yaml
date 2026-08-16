@@ -7,11 +7,6 @@ profiles:
     namespace: android
     mappings:
       "07:0058": DPAD_CENTER
-      # Example device-specific streaming buttons.
-      "00FF:00A1": VIDEO_APP_1
-      "00FF:00A2": VIDEO_APP_2
-      "00FF:00A3": VIDEO_APP_3
-      "00FF:00A4": VIDEO_APP_4
       "0C:008D": GUIDE
       "0C:0223": HOME
 

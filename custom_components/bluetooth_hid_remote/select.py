@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from homeassistant.components.assist_pipeline.select import AssistPipelineSelect
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -16,10 +16,22 @@ async def async_setup_entry(
     entry: BluetoothHidRemoteConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up a pipeline selector only when the descriptor supports voice."""
+    """Set up a pipeline selector when static metadata proves voice support."""
     manager = entry.runtime_data
-    if manager.supports_voice:
+    entity_added = False
+
+    @callback
+    def async_add_if_supported() -> None:
+        nonlocal entity_added
+        if entity_added or not manager.supports_voice:
+            return
+        entity_added = True
         async_add_entities([BluetoothHidRemotePipelineSelect(hass, manager)])
+
+    entry.async_on_unload(
+        manager.async_add_voice_support_listener(async_add_if_supported)
+    )
+    async_add_if_supported()
 
 
 class BluetoothHidRemotePipelineSelect(AssistPipelineSelect):

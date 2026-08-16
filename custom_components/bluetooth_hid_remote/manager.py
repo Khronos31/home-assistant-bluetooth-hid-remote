@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from asyncio import Lock, TimerHandle
+from asyncio import Lock, Task, TimerHandle, sleep
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -37,16 +37,23 @@ from .const import (
     HID_REPORT_MAP_UUID,
     HID_REPORT_REFERENCE_UUID,
     HID_REPORT_TYPE_INPUT,
+    HID_REPORT_TYPE_OUTPUT,
     HID_REPORT_UUID,
     HID_SERVICE_UUID,
 )
 from .hid import HidReportDecoder, HidUsage
+from .hidraw import BluetoothHidRawWriter, HidRawReportError
 from .input_grab import BluetoothInputGrabber, InputGrabStatus
 from .keymap import KeyMapper
 from .voice import (
     ATVV_CODEC_ADPCM_16K,
+    FIRE_TV_VOICE_START_COMMAND,
+    FIRE_TV_VOICE_STOP_COMMAND,
+    VOICE_CONTROL_OUTPUT_REPORT_ID,
     VOICE_PACKET_SIZE,
     VOICE_REPORT_ID,
+    VOICE_START_COMMAND,
+    VOICE_STOP_COMMAND,
     AtvvImaAdpcmDecoder,
     HidVoicePacket,
     PcmVoicePacket,
@@ -56,6 +63,12 @@ from .voice import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+_METADATA_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0, 16.0)
+_HID_VOICE_FALLBACK_DELAY = 0.15
+_SEARCH_USAGE = (0x0C, 0x0221)
+_GENUINE_FIRE_TV_MODALIAS_PREFIX = "bluetooth:v0171p042f"
+_GENUINE_FIRE_TV_HID_ID = "0005:00000171:0000042f"
 
 type VoiceListener = Callable[[VoicePacket | None], None]
 
@@ -142,14 +155,22 @@ class BluetoothHidRemoteManager:
                 hass, coroutine, name=name
             ),
         )
+        self.hidraw_writer = BluetoothHidRawWriter(self.address)
 
         self._listeners: set[Callable[[HidInputReport], None]] = set()
         self._voice_listeners: set[VoiceListener] = set()
+        self._voice_support_listeners: set[Callable[[], None]] = set()
+        self._metadata_retry_task: Task[None] | None = None
         self._unsub_bluetooth: CALLBACK_TYPE | None = None
         self._bluez_manager: BlueZManager | None = None
         self._bluez_watcher: DeviceWatcher | None = None
         self._device_path: str | None = None
         self._report_metadata_by_path: dict[str, tuple[int, int]] = {}
+        self._hid_output_report_paths: dict[int, tuple[str, str]] = {}
+        self._hid_voice_start_task: Task[None] | None = None
+        self._hid_voice_command_active = False
+        self._hid_voice_button_pressed = False
+        self._hid_voice_packet_seen = False
         self._atvv_paths: dict[str, str] = {}
         self._atvv_tx_path: str | None = None
         self._atvv_close_timer: TimerHandle | None = None
@@ -184,6 +205,17 @@ class BluetoothHidRemoteManager:
 
     async def async_stop(self) -> None:
         """Remove observers without disconnecting the HID remote."""
+        self._cancel_metadata_retry()
+        self._cancel_hid_voice_start()
+        if self._hid_voice_command_active:
+            try:
+                await self._async_stop_hid_voice_command()
+            except Exception:
+                _LOGGER.debug(
+                    "Could not stop HID voice while unloading %s",
+                    self.address,
+                    exc_info=True,
+                )
         if self._atvv_close_timer is not None:
             self._cancel_atvv_capture()
             try:
@@ -263,7 +295,7 @@ class BluetoothHidRemoteManager:
         if self.connected:
             # Initial platform setup needs descriptor metadata so voice-only
             # reports never briefly surface as ordinary key events.
-            await self._async_map_report_characteristics()
+            await self._async_map_report_characteristics_then_retry()
 
     def async_add_listener(
         self, listener: Callable[[HidInputReport], None]
@@ -276,6 +308,13 @@ class BluetoothHidRemoteManager:
         """Subscribe to validated voice packets and stream termination."""
         self._voice_listeners.add(listener)
         return lambda: self._voice_listeners.discard(listener)
+
+    def async_add_voice_support_listener(
+        self, listener: Callable[[], None]
+    ) -> CALLBACK_TYPE:
+        """Subscribe to voice capability discovered after platform setup."""
+        self._voice_support_listeners.add(listener)
+        return lambda: self._voice_support_listeners.discard(listener)
 
     @property
     def supports_voice(self) -> bool:
@@ -310,7 +349,13 @@ class BluetoothHidRemoteManager:
         self.connected = connected
         _LOGGER.debug("BlueZ HID connection %s connected=%s", self.address, connected)
         if not connected:
+            self._cancel_metadata_retry()
+            self._cancel_hid_voice_start()
+            self._hid_voice_command_active = False
+            self._hid_voice_button_pressed = False
+            self._hid_voice_packet_seen = False
             self._report_metadata_by_path.clear()
+            getattr(self, "_hid_output_report_paths", {}).clear()
             self._atvv_paths.clear()
             self._cancel_atvv_capture()
             self._ignored_value_paths.clear()
@@ -325,11 +370,25 @@ class BluetoothHidRemoteManager:
             return
         self.entry.async_create_background_task(
             self.hass,
-            self._async_map_report_characteristics(),
+            self._async_map_report_characteristics_then_retry(),
             name=f"Bluetooth HID metadata {self.address}",
         )
 
-    async def _async_map_report_characteristics(self) -> None:
+    async def _async_map_report_characteristics_then_retry(self) -> None:
+        """Map once and start one bounded retry loop when BlueZ is early."""
+        try:
+            complete = await self._async_map_report_characteristics()
+        except Exception:
+            complete = False
+            _LOGGER.debug(
+                "Could not finish HOGP metadata mapping for %s",
+                self.address,
+                exc_info=True,
+            )
+        if not complete:
+            self._schedule_metadata_retry()
+
+    async def _async_map_report_characteristics(self) -> bool:
         """Map HOGP report paths without opening or closing a BLE connection."""
         manager = self._bluez_manager
         device_path = self._device_path
@@ -348,7 +407,7 @@ class BluetoothHidRemoteManager:
                 self.address,
                 exc_info=True,
             )
-            return
+            return False
 
         atvv_notification_paths = self._map_atvv_characteristics(
             services.get_service(ATVV_SERVICE_UUID)
@@ -357,7 +416,8 @@ class BluetoothHidRemoteManager:
         if service is None:
             _LOGGER.debug("BlueZ exposed no HOGP GATT service for %s", self.address)
             await self._async_start_notifications(atvv_notification_paths)
-            return
+            self._async_notify_voice_support_available()
+            return self.supports_voice
 
         metadata: dict[str, tuple[int, int]] = {}
         notification_paths: list[str] = []
@@ -386,12 +446,68 @@ class BluetoothHidRemoteManager:
         await self._async_start_notifications(
             [*notification_paths, *atvv_notification_paths]
         )
+        self._async_notify_voice_support_available()
         if self._atvv_tx_path is not None:
             # StartNotify may echo an old cached value. It has completed now,
             # so the identical response to this fresh request must be parsed.
             for path in atvv_notification_paths:
                 self._initial_cached_values_by_path.pop(path, None)
             await self._async_write_atvv(_ATVV_GET_CAPS, "GET_CAPS")
+        return self._report_decoder is not None or self.supports_voice
+
+    @callback
+    def _schedule_metadata_retry(self) -> None:
+        """Retry delayed BlueZ GATT metadata without creating task storms."""
+        if (
+            self._stopping
+            or not self.connected
+            or (
+                self._metadata_retry_task is not None
+                and not self._metadata_retry_task.done()
+            )
+        ):
+            return
+        self._metadata_retry_task = self.entry.async_create_background_task(
+            self.hass,
+            self._async_retry_metadata(),
+            name=f"Bluetooth HID metadata retry {self.address}",
+        )
+
+    async def _async_retry_metadata(self) -> None:
+        """Retry only metadata reads on BlueZ's existing connection."""
+        try:
+            for delay in _METADATA_RETRY_DELAYS:
+                await sleep(delay)
+                if self._stopping or not self.connected:
+                    return
+                try:
+                    if await self._async_map_report_characteristics():
+                        return
+                except Exception:
+                    _LOGGER.debug(
+                        "Could not finish delayed HOGP metadata mapping for %s",
+                        self.address,
+                        exc_info=True,
+                    )
+            _LOGGER.debug("Stopped bounded HOGP metadata retries for %s", self.address)
+        finally:
+            self._metadata_retry_task = None
+
+    @callback
+    def _cancel_metadata_retry(self) -> None:
+        """Cancel only this manager's pending metadata retry task."""
+        task = self._metadata_retry_task
+        self._metadata_retry_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    @callback
+    def _async_notify_voice_support_available(self) -> None:
+        """Notify platforms once static metadata proves voice support."""
+        if not self.supports_voice:
+            return
+        for listener in tuple(self._voice_support_listeners):
+            listener()
 
     def _map_atvv_characteristics(self, service) -> list[str]:
         """Map Google's proprietary voice paths without sending commands."""
@@ -459,9 +575,12 @@ class BluetoothHidRemoteManager:
                         exc_info=True,
                     )
 
+        output_reports: dict[int, tuple[str, str]] = {}
         for characteristic in service.characteristics:
+            if characteristic.uuid.lower() != HID_REPORT_UUID:
+                continue
             path = self._gatt_object_path(characteristic)
-            if path not in metadata:
+            if path is None:
                 continue
             descriptor = next(
                 (
@@ -488,9 +607,199 @@ class BluetoothHidRemoteManager:
                     exc_info=True,
                 )
                 continue
-            if reference is None or reference[1] != HID_REPORT_TYPE_INPUT:
+            if reference is None:
                 continue
-            metadata[path] = (reference[0], characteristic.handle)
+            report_id, report_type = reference
+            if report_type == HID_REPORT_TYPE_INPUT and path in metadata:
+                metadata[path] = (report_id, characteristic.handle)
+                continue
+            if report_type != HID_REPORT_TYPE_OUTPUT:
+                continue
+            properties = set(getattr(characteristic, "properties", ()))
+            if "write" in properties:
+                write_type = "request"
+            elif "write-without-response" in properties:
+                write_type = "command"
+            else:
+                continue
+            output_reports[report_id] = (path, write_type)
+        self._hid_output_report_paths = output_reports
+
+    async def _async_write_hid_output(
+        self, report_id: int, value: bytes, operation: str
+    ) -> bool:
+        """Write one descriptor-identified HID output report over BlueZ."""
+        hidraw_writer = getattr(self, "hidraw_writer", None)
+        if hidraw_writer is not None:
+            try:
+                path = await hidraw_writer.async_write(report_id, value)
+            except HidRawReportError as err:
+                _LOGGER.debug(
+                    "Could not send HID %s through hidraw for %s: %s",
+                    operation,
+                    self.address,
+                    err,
+                )
+            else:
+                _LOGGER.debug(
+                    "Sent HID %s through %s address=%s report_id=0x%02x "
+                    "value=%s bytes=%d",
+                    operation,
+                    path,
+                    self.address,
+                    report_id,
+                    value.hex(),
+                    len(value),
+                )
+                return True
+
+        manager = self._bluez_manager
+        bus = manager._bus if manager is not None else None
+        target = getattr(self, "_hid_output_report_paths", {}).get(report_id)
+        if (
+            bus is None
+            or not bus.connected
+            or not self.connected
+            or self._stopping
+            or target is None
+        ):
+            _LOGGER.debug("Skipped HID %s for unavailable %s", operation, self.address)
+            return False
+        path, write_type = target
+        reply = await bus.call(
+            Message(
+                destination=defs.BLUEZ_SERVICE,
+                path=path,
+                interface=defs.GATT_CHARACTERISTIC_INTERFACE,
+                member="WriteValue",
+                signature="aya{sv}",
+                body=[bytes(value), {"type": Variant("s", write_type)}],
+            )
+        )
+        assert_gatt_reply(reply)
+        _LOGGER.debug(
+            "Sent HID %s address=%s report_id=0x%02x value=%s bytes=%d",
+            operation,
+            self.address,
+            report_id,
+            value.hex(),
+            len(value),
+        )
+        return True
+
+    @callback
+    def _schedule_hid_voice_start(self) -> None:
+        """Give self-starting remotes time before using BSA host control."""
+        if (
+            VOICE_CONTROL_OUTPUT_REPORT_ID
+            not in getattr(self, "_hid_output_report_paths", {})
+            or getattr(self, "_hid_voice_command_active", False)
+            or (
+                getattr(self, "_hid_voice_start_task", None) is not None
+                and not self._hid_voice_start_task.done()
+            )
+        ):
+            return
+        self._hid_voice_packet_seen = False
+        self._hid_voice_start_task = self.entry.async_create_background_task(
+            self.hass,
+            self._async_start_hid_voice_command(),
+            name=f"Start HID voice {self.address}",
+        )
+
+    async def _async_start_hid_voice_command(self) -> None:
+        """Start BSA Opus only when no native voice packet arrived first."""
+        try:
+            await sleep(_HID_VOICE_FALLBACK_DELAY)
+            if (
+                self._hid_voice_packet_seen
+                or not self._hid_voice_button_pressed
+                or not self.connected
+                or self._stopping
+            ):
+                return
+            start_command, _ = await self._async_hid_voice_commands()
+            self._hid_voice_command_active = await self._async_write_hid_output(
+                VOICE_CONTROL_OUTPUT_REPORT_ID,
+                start_command,
+                "VOICE_START",
+            )
+            if self._hid_voice_command_active and not self._hid_voice_button_pressed:
+                await self._async_stop_hid_voice_command()
+        except Exception:
+            _LOGGER.debug(
+                "Could not start HID voice for %s", self.address, exc_info=True
+            )
+        finally:
+            self._hid_voice_start_task = None
+
+    async def _async_stop_hid_voice_command(self) -> None:
+        """Stop a BSA Opus stream previously opened by this manager."""
+        try:
+            _, stop_command = await self._async_hid_voice_commands()
+            await self._async_write_hid_output(
+                VOICE_CONTROL_OUTPUT_REPORT_ID,
+                stop_command,
+                "VOICE_STOP",
+            )
+        finally:
+            self._hid_voice_command_active = False
+
+    async def _async_hid_voice_commands(self) -> tuple[bytes, bytes]:
+        """Select the audio-state values used by the connected remote firmware."""
+        hidraw_writer = getattr(self, "hidraw_writer", None)
+        identity_reader = getattr(hidraw_writer, "async_hid_id", None)
+        if identity_reader is not None:
+            try:
+                hid_id = await identity_reader()
+            except OSError:
+                hid_id = None
+            if isinstance(hid_id, str) and hid_id.casefold() == _GENUINE_FIRE_TV_HID_ID:
+                return FIRE_TV_VOICE_START_COMMAND, FIRE_TV_VOICE_STOP_COMMAND
+
+        # BlueZ normally exposes the same VID/PID. Keep it as a fallback for
+        # hosts that provide HOGP but no hidraw sysfs node.
+        manager = getattr(self, "_bluez_manager", None)
+        device_path = getattr(self, "_device_path", None)
+        properties = (
+            manager._properties.get(device_path, {}).get(defs.DEVICE_INTERFACE, {})
+            if manager is not None and device_path is not None
+            else {}
+        )
+        modalias = properties.get("Modalias", "")
+        if isinstance(modalias, str) and modalias.casefold().startswith(
+            _GENUINE_FIRE_TV_MODALIAS_PREFIX
+        ):
+            return FIRE_TV_VOICE_START_COMMAND, FIRE_TV_VOICE_STOP_COMMAND
+        return VOICE_START_COMMAND, VOICE_STOP_COMMAND
+
+    @callback
+    def _cancel_hid_voice_start(self) -> None:
+        """Cancel only the pending BSA fallback start."""
+        task = getattr(self, "_hid_voice_start_task", None)
+        self._hid_voice_start_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    @callback
+    def _handle_hid_voice_button(self, report: HidInputReport) -> None:
+        """Drive BSA output control from the descriptor-decoded Search key."""
+        if not any(
+            (usage.usage_page, usage.usage_id) == _SEARCH_USAGE
+            for usage in report.usages
+        ):
+            return
+        if report.event_type == EVENT_KEY_PRESSED:
+            self._hid_voice_button_pressed = True
+            self._schedule_hid_voice_start()
+            return
+        self._hid_voice_button_pressed = False
+        if getattr(self, "_hid_voice_command_active", False):
+            self.entry.async_create_background_task(
+                self.hass,
+                self._async_stop_hid_voice_command(),
+                name=f"Stop HID voice {self.address}",
+            )
 
     @staticmethod
     def _gatt_object_path(gatt_object) -> str | None:
@@ -861,6 +1170,7 @@ class BluetoothHidRemoteManager:
             and self.supports_voice
             and is_supported_opus_packet(value)
         ):
+            self._hid_voice_packet_seen = True
             self._publish_voice_packet(
                 HidVoicePacket(report_id, characteristic_handle, bytes(value))
             )
@@ -895,6 +1205,7 @@ class BluetoothHidRemoteManager:
         report = HidInputReport(
             report_id, characteristic_handle, bytes(data), usages=usages
         )
+        self._handle_hid_voice_button(report)
         self.last_report = report
         _LOGGER.debug(
             "HID input address=%s report_id=%d handle=%d data=%s",

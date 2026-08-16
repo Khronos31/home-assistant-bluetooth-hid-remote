@@ -24,6 +24,8 @@ from .manager import bluez_device_path_from_address
 _ADDRESS_RE = re.compile(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}\Z")
 _AR_NAME = "AR"
 _AR_APPEARANCE = 0x0180
+_AR_MANUFACTURER_ID = 0x0171
+_AR_PRODUCT_DATA = bytes.fromhex("041e")
 _BLUEZ_SERVICE = "org.bluez"
 _DBUS_SERVICE = "org.freedesktop.DBus"
 _DBUS_PATH = "/org/freedesktop/DBus"
@@ -60,9 +62,12 @@ def is_ar_cache_repair_candidate(manager: BlueZManager, device_path: str) -> boo
     """Match only the tested AR HOGP identity, not arbitrary HID devices."""
     properties = _properties(manager, device_path, defs.DEVICE_INTERFACE)
     uuids = {str(uuid).casefold() for uuid in properties.get("UUIDs", ())}
+    manufacturer_data = properties.get("ManufacturerData", {})
     return (
         properties.get("Name") == _AR_NAME
         and properties.get("Appearance") == _AR_APPEARANCE
+        and isinstance(manufacturer_data, dict)
+        and manufacturer_data.get(_AR_MANUFACTURER_ID) == _AR_PRODUCT_DATA
         and HID_SERVICE_UUID in uuids
         and bool(properties.get("Paired"))
         and bool(properties.get("Bonded"))
@@ -138,6 +143,7 @@ async def _async_install_cache(
     cache_path: str,
     adapter_address: str,
     device_address: str,
+    description: str = "Install verified AR GATT cache",
 ) -> None:
     unit = f"bluetooth-hid-cache-{secrets.token_hex(6)}.service"
     unit_path: str | None = None
@@ -156,7 +162,7 @@ async def _async_install_cache(
                     [
                         (
                             "Description",
-                            Variant("s", "Install verified AR GATT cache"),
+                            Variant("s", description),
                         ),
                         ("Type", Variant("s", "oneshot")),
                         ("RemainAfterExit", Variant("b", True)),
@@ -191,6 +197,24 @@ async def _async_install_cache(
         if unit_path is not None:
             with suppress(Exception):
                 await _async_systemd_named_unit(bus, "StopUnit", unit)
+
+
+async def _async_restore_cache(
+    bus: MessageBus,
+    *,
+    helper_path: str,
+    adapter_address: str,
+    device_address: str,
+) -> None:
+    """Restore the cache snapshot created by the compatibility installer."""
+    await _async_install_cache(
+        bus,
+        helper_path=helper_path,
+        cache_path="restore",
+        adapter_address=adapter_address,
+        device_address=device_address,
+        description="Restore original AR GATT cache",
+    )
 
 
 async def _async_systemd_named_unit(bus: MessageBus, member: str, unit: str) -> None:
@@ -321,6 +345,80 @@ async def async_install_ar_gatt_cache(
         except Exception as err:
             raise CompatibilityRepairError(
                 "HAOS could not install the AR BlueZ GATT cache"
+            ) from err
+        finally:
+            if bluez_stopped:
+                try:
+                    await _async_systemd_unit(bus, "StartUnit")
+                    await _async_wait_for_bluez(bus, running=True)
+                except Exception as err:
+                    raise CompatibilityRepairError(
+                        "The cache operation finished, but Bluetooth did not restart"
+                    ) from err
+    finally:
+        bus.disconnect()
+
+
+async def async_restore_ar_gatt_cache(
+    hass: HomeAssistant,
+    address: str,
+    *,
+    manager: BlueZManager | None = None,
+) -> None:
+    """Restore the pre-repair AR cache after explicit user consent."""
+    address = address.upper()
+    if not _ADDRESS_RE.fullmatch(address):
+        raise CompatibilityRepairUnsupportedError("Invalid Bluetooth address")
+    if manager is None:
+        manager = await get_global_bluez_manager()
+
+    device_path = bluez_device_path_from_address(manager, address)
+    if device_path is None:
+        raise CompatibilityRepairUnsupportedError(
+            "BlueZ no longer exposes the selected device"
+        )
+
+    device = _properties(manager, device_path, defs.DEVICE_INTERFACE)
+    adapter_path = device.get("Adapter")
+    if not isinstance(adapter_path, str):
+        raise CompatibilityRepairUnsupportedError(
+            "BlueZ did not report the direct adapter"
+        )
+    adapter = _properties(manager, adapter_path, defs.ADAPTER_INTERFACE)
+    adapter_address = str(adapter.get("Address", "")).upper()
+    if not _ADDRESS_RE.fullmatch(adapter_address):
+        raise CompatibilityRepairUnsupportedError(
+            "BlueZ reported an invalid adapter address"
+        )
+
+    config_dir = Path(hass.config.config_dir)
+    component_dir = Path(__file__).parent
+    helper_path = _host_config_path(
+        component_dir / "compatibility" / "restore-bluez-cache.sh", config_dir
+    )
+
+    try:
+        bus = await _async_open_system_bus()
+    except Exception as err:
+        raise CompatibilityRepairUnsupportedError(
+            "Could not open the HAOS system bus"
+        ) from err
+
+    bluez_stopped = False
+    try:
+        try:
+            await _async_systemd_unit(bus, "StopUnit")
+            bluez_stopped = True
+            await _async_wait_for_bluez(bus, running=False)
+            await _async_restore_cache(
+                bus,
+                helper_path=helper_path,
+                adapter_address=adapter_address,
+                device_address=address,
+            )
+        except Exception as err:
+            raise CompatibilityRepairError(
+                "HAOS could not restore the original AR BlueZ GATT cache"
             ) from err
         finally:
             if bluez_stopped:

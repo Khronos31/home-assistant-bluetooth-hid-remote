@@ -229,13 +229,36 @@ unchanged unless the user explicitly removes it.
 8. A BlueZ input Report value cached before `StartNotify` is suppressed only
    when the first notification is byte-identical. A different first value is
    published as a real key press without delay.
-9. A device-specific custom profile maps the AR remote's branded usages
-   `0x00FF:0x00A1` through `0x00A4` to Android's service-neutral
-   `VIDEO_APP_1`/`289` through `VIDEO_APP_4`/`292`; the built-in profile leaves
-   these standard HID usages unknown.
+9. Android TV / Fire TV maps the branded usages shared by the genuine Fire TV
+   remote and compatible AR, `0x00FF:0x00A1` through `0x00A4`, to Android's
+   service-neutral `VIDEO_APP_1`/`289` through `VIDEO_APP_4`/`292`.
 10. The public Google TV profile maps all fifteen proprietary low-numbered
-    usages observed on the genuine Google TV Remote into the Android
-    namespace, while unobserved standard usages fall back to Android TV.
+    usages observed identically on the genuine and compatible Google TV
+    remotes into the Android namespace, while unobserved standard usages fall
+    back to Android TV.
+11. A sleeping voice remote need not expose its Report Map while Core forwards
+    entity platforms. When metadata later proves voice support, the existing
+    config entry adds its Assist satellite and pipeline selector exactly once;
+    a non-voice remote still gains neither entity. If BlueZ reports the
+    connection before its GATT objects are readable, one single-flight retry
+    task probes the existing connection after 1, 2, 4, 8, and 16 seconds. It
+    never opens a BLE connection and is cancelled on disconnect or unload.
+
+### 2026-08-16 hardware validation
+
+- The genuine and tested compatible Google TV remotes produced the same
+  fifteen button usages and both completed the ATVV audio path. The Google TV
+  profile is therefore public rather than a household-only custom profile.
+- The genuine Fire TV remote and compatible AR produced the same ordinary key
+  usages, including vendor usages `0x00FF:0x00A1` through `0x00A4`. Those keys
+  belong in the public Android TV / Fire TV profile.
+- Compatible AR starts sending 80-byte HID input Report `0xF0` packets while
+  its microphone button is held. The genuine Fire TV remote instead requires
+  the Amazon audio-state pair, F2 start `0x01` and stop `0x00`; after that
+  handshake it also produced 80-byte `0xF0` Opus packets and completed Assist.
+- All four independent hardware cells completed both ordinary-key and voice
+  validation: genuine and compatible Google TV remotes, plus genuine and
+  compatible Fire TV remotes.
 
 ## Voice remote roadmap
 
@@ -413,25 +436,68 @@ Passing one cell never implies support for another.
   feeds the same per-device Assist satellite used by the HOGP/Opus path. A
   genuine-device run recognized `今、何時ですか？` exactly and completed the
   Intent stage successfully.
-- This establishes the genuine Google transport but does not complete v0.2.0:
-  the separately purchased compatible Google TV remote and genuine Fire TV
-  remote remain independent required test targets.
+- The separately purchased compatible Google TV remote reproduced the same
+  ATVV behavior and completed Assist independently, so both Google hardware
+  cells are validated rather than inferred from appearance.
+
+#### Genuine Fire TV voice control research (unreleased, 2026-08-16)
+
+- The genuine Fire TV remote and the tested compatible `AR` remote expose the
+  same descriptor-level BSA voice layout: `0xF0` is an 80-byte Opus input,
+  `0xF1` is voice-control input, and `0xF2` is a one-byte host-to-remote output.
+- The compatible `AR` observed in this household starts sending `0xF0` packets
+  by itself. Its descriptor matches the genuine remote, but that does not make
+  their host-control state values interchangeable.
+- The unreleased implementation locates output report `0xF2` through its HID
+  Report Reference descriptor and characteristic write properties. It does not
+  hard-code a GATT handle or object path.
+- After a descriptor-decoded Search press, the manager waits 150 ms for a
+  native `0xF0` packet. Only when none arrives does it write the BSA start
+  command; it writes stop on release. This preserves the already-working
+  self-starting compatible remote while enabling the genuine remote.
+- A release racing the asynchronous start write is explicitly closed by an
+  immediate stop, and disconnect/unload clears the per-device command state.
+- Protocol and unit-test results were followed by independent Assist captures
+  on both the genuine Fire remote and compatible `AR`.
+- The first genuine-device run selected F2 correctly but a direct BlueZ GATT
+  Write Request was rejected by the remote with ATT `Insufficient
+  Authorization`. Linux had already bound the same address to its HOGP hidraw
+  device. The next implementation therefore resolves `/dev/hidraw*` by the
+  exact `HID_UNIQ` Bluetooth address and sends the numbered output report
+  through the kernel HID driver first, with direct GATT retained only as a
+  fallback. Volatile hidraw node numbers and product IDs are not part of the
+  matching contract.
+- A passive `btmon` capture then proved that the hidraw path produced an ATT
+  Write Request to the genuine remote's F2 value handle and that the remote
+  returned a successful Write Response. No `0xF0` audio followed `0x02`, so
+  transport and authorization were no longer plausible causes.
+- Amazon's published [Fire TV BLE remote kernel driver][amazon-fire-hid]
+  defines the genuine Lab126 audio-state commands as start `0x01` and stop
+  `0x00`. The earlier `0x02`/`0x03` values came from a generic BSA reference,
+  not Amazon's host implementation. Product `0171:042F` now selects Amazon's
+  pair by reading `HID_ID` from the exact address-matched hidraw sysfs node,
+  with BlueZ `Modalias` retained as a fallback. The compatible remote keeps
+  its existing self-start-first behavior and generic fallback values.
+- Hardware validation on `0171:042F` then succeeded: F2 start `0x01` produced
+  continuous 80-byte Report ID `0xF0` Opus notifications, F2 stop `0x00`
+  closed the stream, and the per-device Assist satellite returned to idle
+  after processing. The compatible `0171:041E` was tested again afterward;
+  it continued to self-start its `0xF0` stream and completed Assist without
+  receiving the genuine-device control pair. The Fire transport portion of
+  the v0.2.0 hardware matrix is therefore complete.
 
 [google-atvv-gatt]: https://android.googlesource.com/platform/hardware/telink/atv/refDesignRcu/+/refs/heads/master/vendor/827x_ble_remote/app_att.c
 [google-atvv-control]: https://android.googlesource.com/platform/hardware/telink/atv/refDesignRcu/+/86f501098fb4ba60954cb046201ffe43ca360c3e/application/audio/gl_audio.h
+[infineon-bsa-voice]: https://github.com/Infineon/mtb-example-btstack-freertos-cyw20829-voice-remote
+[amazon-fire-hid]: https://github.com/amazon-oss/android_kernel_amazon_mt8695/blob/c256543c13d2e2f235aa1ae4562ff8724b90dab6/drivers/hid/hid-ftv-bleremote.c
 
-### Remaining v0.2.0 Google-compatible validation
+### Completed v0.2.0 voice validation
 
-- Keep the implemented genuine Google TV ATVV session control behind the
-  common Assist interface and verify reconnect, timeout, and unload behavior.
-- Test the separately purchased Google TV-compatible remote independently.
-  Its appearance and button layout do not imply protocol compatibility: record
-  whether it reproduces Google's voice GATT services, uses generic
-  Voice-over-HOGP reports like the `AR`, or supplies no usable microphone
-  transport.
+- Genuine and compatible Google TV remotes both use the implemented ATVV
+  transport and completed Assist independently.
+- Genuine Fire TV uses Amazon's host-controlled HOGP/Opus state values;
+  compatible `AR` uses its independently verified self-starting HOGP/Opus
+  behavior.
 - Keep device-specific transports behind one common push-to-talk/Assist
   session interface; do not leak Google- or Fire-TV-specific report handling
   into the event entity.
-- If the Google transport requires unavailable proprietary host components,
-  document that hardware identity as unsupported rather than treating the
-  look-alike remote as proof of compatibility.
