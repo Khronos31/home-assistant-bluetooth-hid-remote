@@ -96,10 +96,10 @@ def test_android_tv_profile_does_not_invent_unmapped_linux_compatibility() -> No
         (0x07, 0x0001, 24, "VOLUME_UP"),
         (0x07, 0x0002, 25, "VOLUME_DOWN"),
         (0x0C, 0x0009, 164, "VOLUME_MUTE"),
-        (0x0C, 0x000A, 289, "VIDEO_APP_1"),
-        (0x0C, 0x000B, 290, "VIDEO_APP_2"),
+        (0x0C, 0x000A, 190, "BUTTON_3"),
+        (0x0C, 0x000B, 191, "BUTTON_4"),
         (0x0C, 0x000C, 26, "POWER"),
-        (0x0C, 0x000D, 174, "BOOKMARK"),
+        (0x0C, 0x000D, 313, "MACRO_1"),
     ],
 )
 def test_google_tv_profile_uses_observed_remote_button_enum(

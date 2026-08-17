@@ -260,6 +260,18 @@ unchanged unless the user explicitly removes it.
   validation: genuine and compatible Google TV remotes, plus genuine and
   compatible Fire TV remotes.
 
+### 2026-08-18 Google TV keycode correction
+
+- Button Mapper and QuickBars running on the Google TV itself reported the
+  three programmable buttons as `BUTTON_3`/`190`, `BUTTON_4`/`191`, and
+  `MACRO_1`/`313`. The Google TV profile previously named the same usages
+  `VIDEO_APP_1`, `VIDEO_APP_2`, and `BOOKMARK`, which no app on the TV ever
+  sees. Usages `0x000C:0x000A`, `0x000C:0x000B`, and `0x000C:0x000D` now carry
+  the codes the platform actually delivers.
+- The Android TV / Fire TV vendor-page mappings `0x00FF:0x00A1` through
+  `0x00A4` are unaffected; that hardware genuinely reports the `VIDEO_APP_*`
+  identities.
+
 ## Voice remote roadmap
 
 The v0.2.0 hardware coverage matrix contains four independent devices: genuine

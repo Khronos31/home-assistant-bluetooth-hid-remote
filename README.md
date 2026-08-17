@@ -73,7 +73,8 @@ The built-in profiles are:
 - **Google TV**: extends the Android key namespace with the proprietary
   low-numbered HID usages observed identically on the genuine and tested
   compatible Google TV remotes. Its fifteen verified buttons include
-  navigation, volume, voice assist, app shortcuts, power, and favorites.
+  navigation, volume, voice assist, power, and the three programmable buttons
+  Google TV itself reports as `BUTTON_3`, `BUTTON_4`, and `MACRO_1`.
   Unobserved usages retain the Android TV fallback.
 
 Optional custom YAML profiles remain supported for unusual hardware and local

@@ -343,10 +343,13 @@ _GOOGLE_TV_USAGE_NAMES: dict[UsageKey, str] = {
     (0x07, 0x0001): "VOLUME_UP",
     (0x07, 0x0002): "VOLUME_DOWN",
     (0x0C, 0x0009): "VOLUME_MUTE",
-    (0x0C, 0x000A): "VIDEO_APP_1",
-    (0x0C, 0x000B): "VIDEO_APP_2",
+    # Google TV itself delivers these three buttons as BUTTON_3, BUTTON_4 and
+    # MACRO_1; the codes were read back on the device with Button Mapper and
+    # QuickBars. Match what apps on the TV actually receive.
+    (0x0C, 0x000A): "BUTTON_3",
+    (0x0C, 0x000B): "BUTTON_4",
     (0x0C, 0x000C): "POWER",
-    (0x0C, 0x000D): "BOOKMARK",
+    (0x0C, 0x000D): "MACRO_1",
 }
 
 
