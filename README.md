@@ -15,6 +15,20 @@ events through this path on Home Assistant OS 2026.8.1.
 
 Current version: **0.2.1**.
 
+## Known issue: Google TV Remote reconnection
+
+Some Google TV Remote models do not reliably reconnect to the existing BlueZ
+bond after the connection is lost. Pressing a button may not wake a usable
+HOGP connection, and putting the remote into pairing mode may reconnect the
+Bluetooth bond while leaving the Home Assistant entity unavailable. This is a
+known compatibility issue between the remote firmware and the BlueZ/HOGP
+stack; the integration does not force a destructive re-pair or continuously
+poll the remote.
+
+Until this is resolved, take care not to let the Google TV Remote pairing
+drop. For reliable Home Assistant use, a genuine Fire TV remote or a tested
+compatible Fire TV remote is recommended instead.
+
 ## Current development scope
 
 - BLE HOGP service (`0x1812`) only.
