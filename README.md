@@ -38,9 +38,10 @@ compatible Fire TV remote is recommended instead.
 - Selectable HID, Android TV / Fire TV, and Google TV key profiles, plus
   optional custom YAML maps.
 - BlueZ owns the HOGP connection; the integration must not alter its lifetime.
-- Devices with malformed GATT tables may fail BlueZ service discovery. One
-  tested `AR` remote has an explicit, opt-in HAOS compatibility repair; other
-  models are never given that host-side workaround.
+- Devices with malformed GATT tables may fail BlueZ service discovery. The
+  tested `AR` remote and the `SONY TV VRC 001` remote have an explicit,
+  opt-in HAOS compatibility repair; other models are never given that
+  host-side workaround.
 
 Classic Bluetooth HID and pairing through ESPHome Bluetooth Proxy are not
 supported. The pairing flow currently supports confirmation/Just Works style

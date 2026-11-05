@@ -1,11 +1,13 @@
-"""Explicit HAOS compatibility repair for malformed AR GATT discovery."""
+"""Explicit HAOS compatibility repair for remotes with malformed GATT discovery."""
 
 from __future__ import annotations
 
 import asyncio
 import re
 import secrets
+from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,10 +24,14 @@ from .const import HID_SERVICE_UUID
 from .manager import bluez_device_path_from_address
 
 _ADDRESS_RE = re.compile(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}\Z")
+_REMOTE_APPEARANCE = 0x0180
 _AR_NAME = "AR"
-_AR_APPEARANCE = 0x0180
 _AR_MANUFACTURER_ID = 0x0171
 _AR_PRODUCT_DATA = bytes.fromhex("041e")
+_SONY_VRC_001_NAME = "SONY TV VRC 001"
+# Device Information is only readable once the cache is installed, so a fresh
+# bond has no Modalias. When BlueZ does know it, it must be Sony's 054C:0D8D.
+_SONY_VRC_001_MODALIAS_PREFIX = "usb:v054Cp0D8D"
 _BLUEZ_SERVICE = "org.bluez"
 _DBUS_SERVICE = "org.freedesktop.DBus"
 _DBUS_PATH = "/org/freedesktop/DBus"
@@ -58,20 +64,64 @@ def _properties(manager: BlueZManager, path: str, interface: str) -> dict[str, A
         ) from err
 
 
-def is_ar_cache_repair_candidate(manager: BlueZManager, device_path: str) -> bool:
-    """Match only the tested AR HOGP identity, not arbitrary HID devices."""
-    properties = _properties(manager, device_path, defs.DEVICE_INTERFACE)
+def _is_bonded_hogp_remote(properties: dict[str, Any]) -> bool:
     uuids = {str(uuid).casefold() for uuid in properties.get("UUIDs", ())}
-    manufacturer_data = properties.get("ManufacturerData", {})
     return (
-        properties.get("Name") == _AR_NAME
-        and properties.get("Appearance") == _AR_APPEARANCE
-        and isinstance(manufacturer_data, dict)
-        and manufacturer_data.get(_AR_MANUFACTURER_ID) == _AR_PRODUCT_DATA
+        properties.get("Appearance") == _REMOTE_APPEARANCE
         and HID_SERVICE_UUID in uuids
         and bool(properties.get("Paired"))
         and bool(properties.get("Bonded"))
     )
+
+
+def _matches_ar(properties: dict[str, Any]) -> bool:
+    manufacturer_data = properties.get("ManufacturerData", {})
+    return (
+        properties.get("Name") == _AR_NAME
+        and isinstance(manufacturer_data, dict)
+        and manufacturer_data.get(_AR_MANUFACTURER_ID) == _AR_PRODUCT_DATA
+    )
+
+
+def _matches_sony_vrc_001(properties: dict[str, Any]) -> bool:
+    modalias = properties.get("Modalias")
+    return properties.get("Name") == _SONY_VRC_001_NAME and (
+        modalias is None
+        or str(modalias).upper().startswith(_SONY_VRC_001_MODALIAS_PREFIX.upper())
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class GattCacheProfile:
+    """One tested remote model and the non-secret GATT cache it requires."""
+
+    key: str
+    cache_file: str
+    matches: Callable[[dict[str, Any]], bool]
+
+
+GATT_CACHE_PROFILES: tuple[GattCacheProfile, ...] = (
+    GattCacheProfile("ar", "ar-gatt-cache", _matches_ar),
+    GattCacheProfile("sony_vrc_001", "sony-vrc-001-gatt-cache", _matches_sony_vrc_001),
+)
+
+
+def gatt_cache_profile(
+    manager: BlueZManager, device_path: str
+) -> GattCacheProfile | None:
+    """Match only tested bonded HOGP identities, not arbitrary HID devices."""
+    properties = _properties(manager, device_path, defs.DEVICE_INTERFACE)
+    if not _is_bonded_hogp_remote(properties):
+        return None
+    return next(
+        (profile for profile in GATT_CACHE_PROFILES if profile.matches(properties)),
+        None,
+    )
+
+
+def is_cache_repair_candidate(manager: BlueZManager, device_path: str) -> bool:
+    """Return whether the device matches a tested compatibility profile."""
+    return gatt_cache_profile(manager, device_path) is not None
 
 
 async def _async_open_system_bus() -> MessageBus:
@@ -143,7 +193,7 @@ async def _async_install_cache(
     cache_path: str,
     adapter_address: str,
     device_address: str,
-    description: str = "Install verified AR GATT cache",
+    description: str = "Install verified remote GATT cache",
 ) -> None:
     unit = f"bluetooth-hid-cache-{secrets.token_hex(6)}.service"
     unit_path: str | None = None
@@ -213,7 +263,7 @@ async def _async_restore_cache(
         cache_path="restore",
         adapter_address=adapter_address,
         device_address=device_address,
-        description="Restore original AR GATT cache",
+        description="Restore original remote GATT cache",
     )
 
 
@@ -281,13 +331,13 @@ async def _async_wait_for_unit_success(bus: MessageBus, unit_path: str) -> None:
             await asyncio.sleep(0.1)
 
 
-async def async_install_ar_gatt_cache(
+async def async_install_gatt_cache(
     hass: HomeAssistant,
     address: str,
     *,
     manager: BlueZManager | None = None,
 ) -> None:
-    """Install the tested non-secret AR cache after explicit user consent."""
+    """Install a tested model's non-secret cache after explicit user consent."""
     address = address.upper()
     if not _ADDRESS_RE.fullmatch(address):
         raise CompatibilityRepairUnsupportedError("Invalid Bluetooth address")
@@ -295,9 +345,10 @@ async def async_install_ar_gatt_cache(
         manager = await get_global_bluez_manager()
 
     device_path = bluez_device_path_from_address(manager, address)
-    if device_path is None or not is_ar_cache_repair_candidate(manager, device_path):
+    profile = None if device_path is None else gatt_cache_profile(manager, device_path)
+    if profile is None:
         raise CompatibilityRepairUnsupportedError(
-            "The selected device does not match the tested AR compatibility profile"
+            "The selected device does not match a tested compatibility profile"
         )
 
     device = _properties(manager, device_path, defs.DEVICE_INTERFACE)
@@ -319,7 +370,7 @@ async def async_install_ar_gatt_cache(
         component_dir / "compatibility" / "install-bluez-cache.sh", config_dir
     )
     cache_path = _host_config_path(
-        component_dir / "compatibility" / "ar-gatt-cache", config_dir
+        component_dir / "compatibility" / profile.cache_file, config_dir
     )
 
     try:
@@ -344,7 +395,7 @@ async def async_install_ar_gatt_cache(
             )
         except Exception as err:
             raise CompatibilityRepairError(
-                "HAOS could not install the AR BlueZ GATT cache"
+                "HAOS could not install the remote's BlueZ GATT cache"
             ) from err
         finally:
             if bluez_stopped:
@@ -359,13 +410,13 @@ async def async_install_ar_gatt_cache(
         bus.disconnect()
 
 
-async def async_restore_ar_gatt_cache(
+async def async_restore_gatt_cache(
     hass: HomeAssistant,
     address: str,
     *,
     manager: BlueZManager | None = None,
 ) -> None:
-    """Restore the pre-repair AR cache after explicit user consent."""
+    """Restore the pre-repair cache after explicit user consent."""
     address = address.upper()
     if not _ADDRESS_RE.fullmatch(address):
         raise CompatibilityRepairUnsupportedError("Invalid Bluetooth address")
@@ -418,7 +469,7 @@ async def async_restore_ar_gatt_cache(
             )
         except Exception as err:
             raise CompatibilityRepairError(
-                "HAOS could not restore the original AR BlueZ GATT cache"
+                "HAOS could not restore the remote's original BlueZ GATT cache"
             ) from err
         finally:
             if bluez_stopped:

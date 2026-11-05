@@ -386,7 +386,7 @@ async def test_ar_missing_service_offers_explicit_cache_repair(
         pair,
     )
     monkeypatch.setattr(
-        "custom_components.bluetooth_hid_remote.config_flow.async_install_ar_gatt_cache",
+        "custom_components.bluetooth_hid_remote.config_flow.async_install_gatt_cache",
         repair,
     )
     flow = _new_pairing_flow()
@@ -417,7 +417,7 @@ async def test_ar_cache_repair_failure_remains_on_confirmation(
 ) -> None:
     """A denied or failed HAOS operation stays recoverable in the same form."""
     monkeypatch.setattr(
-        "custom_components.bluetooth_hid_remote.config_flow.async_install_ar_gatt_cache",
+        "custom_components.bluetooth_hid_remote.config_flow.async_install_gatt_cache",
         AsyncMock(side_effect=CompatibilityRepairError("failed")),
     )
     flow = _new_pairing_flow()
@@ -437,7 +437,7 @@ async def test_ar_cache_repair_can_be_explicitly_restored(
     """The wake step exposes a rollback that aborts without an entry."""
     restore = AsyncMock()
     monkeypatch.setattr(
-        "custom_components.bluetooth_hid_remote.config_flow.async_restore_ar_gatt_cache",
+        "custom_components.bluetooth_hid_remote.config_flow.async_restore_gatt_cache",
         restore,
     )
     flow = _new_pairing_flow()

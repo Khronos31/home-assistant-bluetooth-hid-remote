@@ -9,9 +9,9 @@
     },
     "error": {
       "device_not_found": "The remote is no longer visible on the directly attached Bluetooth adapter.",
-      "compatibility_repair_failed": "Home Assistant could not install the AR compatibility cache. Bluetooth was restarted. See the integration log for details.",
-      "compatibility_repair_unsupported": "This host or remote does not match the tested AR compatibility repair.",
-      "compatibility_restore_failed": "Home Assistant could not restore the original AR compatibility cache. Bluetooth was restarted. See the integration log for details.",
+      "compatibility_repair_failed": "Home Assistant could not install the remote's compatibility cache. Bluetooth was restarted. See the integration log for details.",
+      "compatibility_repair_unsupported": "This host or remote does not match a tested compatibility repair.",
+      "compatibility_restore_failed": "Home Assistant could not restore the remote's original compatibility cache. Bluetooth was restarted. See the integration log for details.",
       "pairing_failed": "Bluetooth pairing failed. Put the remote back in pairing mode and try again.",
       "pairing_rejected": "The remote or BlueZ rejected pairing. Put the remote back in pairing mode and try again.",
       "pairing_timeout": "Bluetooth pairing timed out. Keep the remote close to the adapter and in pairing mode, then try again.",
@@ -20,8 +20,8 @@
     },
     "progress": {
       "pairing": "Pairing {name} with Home Assistant. Keep the remote close and in pairing mode.",
-      "repairing_compatibility": "Installing the verified AR compatibility cache. Bluetooth devices will briefly disconnect.",
-      "restoring_compatibility": "Restoring the original AR Bluetooth cache. Bluetooth devices will briefly disconnect.",
+      "repairing_compatibility": "Installing the verified compatibility cache for this remote. Bluetooth devices will briefly disconnect.",
+      "restoring_compatibility": "Restoring this remote's original Bluetooth cache. Bluetooth devices will briefly disconnect.",
       "replacing_bond": "Removing and replacing the unusable bond for {name}. Keep only this remote in pairing mode.",
       "verifying_service": "Checking whether BlueZ has exposed the HID service for {name}. Press a button to wake the remote."
     },
@@ -30,13 +30,13 @@
         "description": "Put {name} in pairing mode, keep it close to Home Assistant's directly attached Bluetooth adapter, then submit to pair and add it. Home Assistant will authorize only this selected HID remote."
       },
       "compatibility_repair": {
-        "description": "{name} is paired and bonded, but this tested AR model returns a malformed GATT table that BlueZ cannot discover. Continue to install a known non-secret HID cache for this device. Home Assistant will briefly restart the host Bluetooth service. Bond keys are not read or modified; only this device's GATT cache is backed up and replaced."
+        "description": "{name} is paired and bonded, but this tested remote model returns a malformed GATT table that BlueZ cannot discover. Continue to install a known non-secret HID cache for this device. Home Assistant will briefly restart the host Bluetooth service. Bond keys are not read or modified; only this device's GATT cache is backed up and replaced."
       },
       "compatibility_wake": {
         "data": {
           "restore_compatibility_cache": "Restore the original cache and stop setup"
         },
-        "description": "The AR compatibility cache was installed and Bluetooth restarted. Press any button on {name} to wake it, wait two seconds, then submit to verify the HID service. Do not reset or re-pair the remote. If verification continues to fail, select restore to put back the exact cache snapshot from before this repair and stop setup."
+        "description": "The compatibility cache was installed and Bluetooth restarted. Press any button on {name} to wake it, wait two seconds, then submit to verify the HID service. Do not reset or re-pair the remote. If verification continues to fail, select restore to put back the exact cache snapshot from before this repair and stop setup."
       },
       "replace_bond": {
         "description": "BlueZ has an existing bond for {name}, but it no longer exposes usable HID services. This commonly happens after resetting the remote. Continue only after putting this remote in pairing mode. Home Assistant will remove and replace the bond for this selected device only."
