@@ -21,9 +21,9 @@ from homeassistant.helpers import selector
 from .compatibility import (
     CompatibilityRepairError,
     CompatibilityRepairUnsupportedError,
-    async_install_ar_gatt_cache,
-    async_restore_ar_gatt_cache,
-    is_ar_cache_repair_candidate,
+    async_install_gatt_cache,
+    async_restore_gatt_cache,
+    is_cache_repair_candidate,
 )
 from .const import (
     CONF_ADDRESS,
@@ -157,7 +157,7 @@ class BluetoothHidRemoteConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_compatibility_repair(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Explicitly apply the tested HAOS workaround for an AR remote."""
+        """Explicitly apply the tested HAOS workaround for a known remote model."""
         if self._discovery is None:
             return self.async_abort(reason="device_not_found")
         if user_input is not None:
@@ -199,11 +199,11 @@ class BluetoothHidRemoteConfigFlow(ConfigFlow, domain=DOMAIN):
                     self._discovery.address, replace_existing=True
                 )
             elif operation == "repair":
-                pairing_coro = async_install_ar_gatt_cache(
+                pairing_coro = async_install_gatt_cache(
                     self.hass, self._discovery.address
                 )
             elif operation == "restore":
-                pairing_coro = async_restore_ar_gatt_cache(
+                pairing_coro = async_restore_gatt_cache(
                     self.hass, self._discovery.address
                 )
             else:
@@ -319,11 +319,11 @@ class BluetoothHidRemoteConfigFlow(ConfigFlow, domain=DOMAIN):
         return "pairing_failed"
 
     async def _async_supports_compatibility_repair(self) -> bool:
-        """Return whether the bonded target exactly matches the tested AR."""
+        """Return whether the bonded target exactly matches a tested model."""
         assert self._discovery is not None
         manager = await get_global_bluez_manager()
         device_path = bluez_device_path_from_address(manager, self._discovery.address)
-        return device_path is not None and is_ar_cache_repair_candidate(
+        return device_path is not None and is_cache_repair_candidate(
             manager, device_path
         )
 

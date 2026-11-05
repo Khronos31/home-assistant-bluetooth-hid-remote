@@ -24,8 +24,9 @@ event entity.
 7. If a reset remote leaves an unusable stale BlueZ bond, the config flow asks
    for a second explicit confirmation before replacing only that selected
    device's bond.
-8. The exact tested `AR` identity may opt in to a bundled non-secret GATT-cache
-   repair on HAOS; unrelated or unbonded HOGP devices can never enter it.
+8. The exact tested `AR` and `SONY TV VRC 001` identities may opt in to a
+   bundled, per-model non-secret GATT-cache repair on HAOS; unrelated or
+   unbonded HOGP devices can never enter it.
 9. Every configured device exclusively acquires all Linux event nodes whose
    sysfs `uniq` exactly matches its Bluetooth address, releases them on unload,
    and publishes acquisition health as a diagnostic binary sensor.
@@ -42,8 +43,8 @@ event entity.
   generic HOGP discovery and pairing path, but users are instructed not to add
   them and their resulting behavior is unsupported.
 - Modifying BlueZ configuration or its built-in HOG profile. The narrowly
-  scoped, confirmed `AR` cache repair described below is the only host-state
-  exception.
+  scoped, confirmed per-model cache repair described below is the only
+  host-state exception.
 - Stable-release claims for untested remote models.
 
 ## Constraints
@@ -140,6 +141,31 @@ unchanged unless the user explicitly removes it.
   runs and verifies a bounded transient one-shot helper, then restarts BlueZ in
   a `finally` path. The config entry is still withheld until the repaired HOGP
   service objects are observable.
+
+## Tested Sony VRC 001 compatibility increment
+
+- The `SONY TV VRC 001` bonds normally, but BlueZ exports no GATT service
+  objects for it, so HOGP never starts.
+- A raw ATT dump at the default 23-byte MTU returned a well-formed table: GAP,
+  GATT, Device Information, Battery, Link Loss, Immediate Alert, Tx Power, HID
+  (`0x0070`-`0x0082`, two notifying input Reports and one output Report), the
+  Google voice service `ab5e0001-...`, and four further vendor services. The
+  remote offers a 251-byte MTU; BlueZ's failure is consistent with malformed
+  mixed-width discovery responses at that larger MTU.
+- An unbounded Find Information request stops at the first empty handle gap
+  after `0x0009`, so descriptors were collected one service range at a time.
+- The table has no Database Hash characteristic. With the cache installed
+  BlueZ exported every service, and `input-hog` created the HID input device
+  as Sony `054C:0D8D`.
+- Eligibility requires `Name=SONY TV VRC 001`, appearance `0x0180`, HOGP UUID,
+  paired, and bonded. The remote advertises no manufacturer data. A fresh bond
+  has no `Modalias` because Device Information is unreadable before the
+  repair; when BlueZ reports one, it must be `usb:v054Cp0D8D`.
+- The installer, restore helper, and host-side procedure are shared with the
+  AR increment; only the bundled cache file differs.
+- On HAOS, a fresh config-flow pairing of one VRC 001 was offered the repair,
+  installed the cache, passed wake verification, and created a working entry
+  that delivers key events.
 
 ## Hardware-spike evidence
 
