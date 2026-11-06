@@ -173,6 +173,7 @@ class BluetoothHidRemoteManager:
         self._hid_voice_packet_seen = False
         self._atvv_paths: dict[str, str] = {}
         self._atvv_tx_path: str | None = None
+        self._atvv_tx_write_type = "command"
         self._atvv_close_timer: TimerHandle | None = None
         self._atvv_audio_packet_count = 0
         self._atvv_capture_active = False
@@ -529,7 +530,24 @@ class BluetoothHidRemoteManager:
                 continue
             discovered.append(f"{kind}@{characteristic.handle}")
             if kind == "tx":
+                # BlueZ sends an explicit "command" even when the
+                # characteristic does not declare write-without-response, and
+                # the remote may silently drop it. Some ATVV remotes (Sony VRC
+                # 001) declare only write, so use the type the TX declares,
+                # preferring write-without-response as on Google's remote.
+                properties = set(characteristic.properties)
+                if "write-without-response" in properties:
+                    self._atvv_tx_write_type = "command"
+                elif "write" in properties:
+                    self._atvv_tx_write_type = "request"
+                else:
+                    _LOGGER.warning(
+                        "Ignored non-writable ATVV TX characteristic on %s",
+                        self.address,
+                    )
+                    continue
                 self._atvv_tx_path = self._gatt_object_path(characteristic)
+                discovered[-1] += f":{self._atvv_tx_write_type}"
                 continue
             if not ({"notify", "indicate"} & set(characteristic.properties)):
                 continue
@@ -845,6 +863,7 @@ class BluetoothHidRemoteManager:
                 "Skipped ATVV %s for disconnected %s", operation, self.address
             )
             return
+        write_type = getattr(self, "_atvv_tx_write_type", "command")
         reply = await bus.call(
             Message(
                 destination=defs.BLUEZ_SERVICE,
@@ -852,12 +871,16 @@ class BluetoothHidRemoteManager:
                 interface=defs.GATT_CHARACTERISTIC_INTERFACE,
                 member="WriteValue",
                 signature="aya{sv}",
-                body=[bytes(value), {"type": Variant("s", "command")}],
+                body=[bytes(value), {"type": Variant("s", write_type)}],
             )
         )
         assert_gatt_reply(reply)
         _LOGGER.debug(
-            "Sent ATVV %s address=%s bytes=%d", operation, self.address, len(value)
+            "Sent ATVV %s address=%s bytes=%d type=%s",
+            operation,
+            self.address,
+            len(value),
+            write_type,
         )
 
     async def _async_start_atvv_capture(self) -> None:

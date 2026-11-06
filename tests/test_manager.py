@@ -304,6 +304,80 @@ async def test_atvv_command_uses_exact_bluez_write_value_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_atvv_command_uses_write_request_when_tx_requires_it() -> None:
+    """A write-only ATVV TX (Sony VRC 001) receives a write request."""
+
+    class Bus:
+        connected = True
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def call(self, message):
+            self.calls.append(message)
+            return SimpleNamespace(
+                message_type=MessageType.METHOD_RETURN,
+                error_name=None,
+            )
+
+    bus = Bus()
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    manager.connected = True
+    manager._stopping = False
+    manager._atvv_tx_path = "/service0200/char0201"
+    manager._atvv_tx_write_type = "request"
+    manager._bluez_manager = SimpleNamespace(_bus=bus)
+
+    await manager._async_write_atvv(bytes.fromhex("0c01"), "MIC_OPEN")
+
+    assert bus.calls[0].body[1]["type"].value == "request"
+
+
+@pytest.mark.parametrize(
+    ("properties", "write_type"),
+    [
+        (["write-without-response", "write"], "command"),
+        (["write-without-response"], "command"),
+        (["write"], "request"),
+    ],
+)
+def test_atvv_tx_write_type_follows_characteristic_properties(
+    properties: list[str], write_type: str
+) -> None:
+    """Write-without-response is kept where declared, else a write request."""
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    tx = SimpleNamespace(
+        uuid=ATVV_TX_UUID,
+        handle=0x201,
+        properties=properties,
+        obj=("/service0200/char0201", {}),
+    )
+
+    manager._map_atvv_characteristics(SimpleNamespace(characteristics=[tx]))
+
+    assert manager._atvv_tx_path == "/service0200/char0201"
+    assert manager._atvv_tx_write_type == write_type
+
+
+def test_non_writable_atvv_tx_is_not_used() -> None:
+    """A TX without any write property disables ATVV voice commands."""
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    tx = SimpleNamespace(
+        uuid=ATVV_TX_UUID,
+        handle=0x201,
+        properties=["read"],
+        obj=("/service0200/char0201", {}),
+    )
+
+    manager._map_atvv_characteristics(SimpleNamespace(characteristics=[tx]))
+
+    assert manager._atvv_tx_path is None
+
+
+@pytest.mark.asyncio
 async def test_hid_metadata_is_loaded_from_existing_bluez_connection() -> None:
     """Report Map and Reference reads populate the decoder and report ID."""
     report_map_path = "/service004f/char0055"

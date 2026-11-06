@@ -166,6 +166,13 @@ unchanged unless the user explicitly removes it.
 - On HAOS, a fresh config-flow pairing of one VRC 001 was offered the repair,
   installed the cache, passed wake verification, and created a working entry
   that delivers key events.
+- Its ATVV TX characteristic (`ab5e0002`) declares only write (`0x08`), not
+  write-without-response. BlueZ does not reject an explicit `command` write on
+  such a characteristic; it sends a write command and reports success, so a
+  remote may drop it silently. ATVV commands therefore use the write type the
+  TX characteristic declares, preferring write-without-response as on Google's
+  reference remote. With write requests, the VRC 001 answered host MIC_CLOSE
+  with Audio Stop; whether it also acts on write commands was not tested.
 
 ## Hardware-spike evidence
 
