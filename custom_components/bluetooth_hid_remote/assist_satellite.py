@@ -146,6 +146,11 @@ class BluetoothHidRemoteAssistSatellite(assist_satellite.AssistSatelliteEntity):
         ):
             return
         if report.event_type == EVENT_KEY_RELEASED:
+            if isinstance(self._voice_buffer, PcmVoiceBuffer):
+                # ATVV streams delimit themselves with Audio Stop. Some ATVV
+                # remotes (Sony VRC 001) start streaming before the Search
+                # release, which must not cut the utterance short.
+                return
             self._finish_recording()
         else:
             self._start_recording()
@@ -165,6 +170,14 @@ class BluetoothHidRemoteAssistSatellite(assist_satellite.AssistSatelliteEntity):
             # A late packet from a just-finished utterance must not start a
             # second pipeline while the first one is decoding.
             return
+        if (
+            not isinstance(self._voice_buffer, expected_type)
+            and isinstance(self._voice_buffer, OpusVoiceBuffer)
+            and not self._voice_buffer.packets
+        ):
+            # The Search press opened a default buffer before the transport
+            # was known; adopt the transport of the first real packet.
+            self._voice_buffer = expected_type()
         if not isinstance(self._voice_buffer, expected_type):
             _LOGGER.warning("Stopped mixed voice transports for %s", self.name)
             self._finish_recording()

@@ -141,6 +141,30 @@ async def test_atvv_pcm_finishes_on_transport_stop() -> None:
 
 
 @pytest.mark.asyncio
+async def test_atvv_stream_started_before_search_release_is_not_cut() -> None:
+    """A remote that streams before the Search release keeps its utterance."""
+    entity = _new_entity()
+    entity._set_state = lambda _state: None
+    process = AsyncMock()
+    entity._async_process_recording = process
+    search = HidUsage(0x0C, 0x0221, "AC Search")
+
+    entity._receive_report(HidInputReport(4, 124, b"\x21\x02", (search,)))
+    entity._receive_voice_packet(PcmVoicePacket(16_000, b"\x01\x00"))
+    entity._receive_report(HidInputReport(4, 124, b"\x00\x00", (search,)))
+    entity._receive_voice_packet(PcmVoicePacket(16_000, b"\x02\x00"))
+    await asyncio.sleep(0)
+    process.assert_not_awaited()
+
+    entity._receive_voice_packet(None)
+    await asyncio.sleep(0)
+
+    recording = process.await_args.args[0]
+    assert isinstance(recording, PcmVoiceBuffer)
+    assert recording.to_pcm() == b"\x01\x00\x02\x00"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("options", "end_stage"),
     [

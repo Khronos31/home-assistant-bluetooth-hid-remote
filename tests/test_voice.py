@@ -7,6 +7,7 @@ import pytest
 from custom_components.bluetooth_hid_remote.voice import (
     MAX_VOICE_PACKETS,
     AtvvImaAdpcmDecoder,
+    AtvvV04FrameDecoder,
     OpusVoiceBuffer,
     PcmVoiceBuffer,
     PcmVoicePacket,
@@ -103,3 +104,44 @@ async def test_ffmpeg_decoder_produces_16khz_mono_pcm() -> None:
 
     assert pcm
     assert len(pcm) % 2 == 0
+
+
+def _v04_frame(sequence: int, predictor: int, step_index: int, code: int) -> bytes:
+    return (
+        sequence.to_bytes(2, "big")
+        + b"\x00"
+        + predictor.to_bytes(2, "big", signed=True)
+        + bytes((step_index,))
+        + bytes((code,)) * 128
+    )
+
+
+def test_atvv_v04_frames_reassemble_across_notifications() -> None:
+    """134-byte frames split into 20-byte notifications decode per frame."""
+    stream = _v04_frame(7, 0, 0, 0x00) + _v04_frame(8, 1000, 10, 0x00)
+    decoder = AtvvV04FrameDecoder()
+    pcm = b"".join(
+        decoder.decode(stream[offset : offset + 20])
+        for offset in range(0, len(stream), 20)
+    )
+
+    assert decoder.frames == 2
+    assert decoder.sequence_gaps == 0
+    assert len(pcm) == 2 * 256 * 2
+    # Each frame starts from its own header state, not the previous frame's.
+    second_first_sample = int.from_bytes(pcm[512:514], "little", signed=True)
+    assert second_first_sample == 1000 + (_STEP_10 >> 3)
+
+
+_STEP_10 = 19  # IMA step table entry for index 10
+
+
+def test_atvv_v04_counts_sequence_gaps_and_rejects_bad_headers() -> None:
+    """A lost frame is counted; an impossible step index stops decoding."""
+    decoder = AtvvV04FrameDecoder()
+    decoder.decode(_v04_frame(1, 0, 0, 0x11))
+    decoder.decode(_v04_frame(3, 0, 0, 0x11))
+    assert decoder.sequence_gaps == 1
+
+    with pytest.raises(VoiceTransportError):
+        decoder.decode(_v04_frame(4, 0, 89, 0x11))

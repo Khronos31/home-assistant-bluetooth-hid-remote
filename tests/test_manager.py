@@ -840,6 +840,41 @@ def test_atvv_values_never_enter_key_pipeline(
     ]
 
 
+def test_atvv_v04_audio_start_decodes_framed_stream(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A codec-less 0.4 Audio Start (Sony VRC 001) decodes framed audio."""
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    control_path = "/service0200/char0206"
+    audio_path = "/service0200/char0203"
+    manager._atvv_paths = {control_path: "control", audio_path: "audio"}
+    manager._atvv_audio_packet_count = 0
+    manager._atvv_decoder = None
+    manager._atvv_frame_bytes = None
+    manager._ignored_value_paths = set()
+    manager._initial_cached_values_by_path = {}
+    manager._report_metadata_by_path = {}
+    manager._listeners = {pytest.fail}
+    voice_packets: list[VoicePacket | None] = []
+    manager._voice_listeners = {voice_packets.append}
+    manager.last_voice_packet = None
+    frame = bytes.fromhex("000100000000") + bytes.fromhex("5a") * 128
+
+    with caplog.at_level("DEBUG"):
+        manager._async_bluez_value_changed(control_path, b"\x04" + bytes(19))
+        for offset in range(0, len(frame), 20):
+            manager._async_bluez_value_changed(audio_path, frame[offset : offset + 20])
+
+    assert "Ignored unsupported ATVV audio codec" not in caplog.text
+    assert "header=000100000000" in caplog.text
+    assert "5a5a" not in caplog.text
+    assert manager._atvv_audio_packet_count == 7
+    assert len(voice_packets) == 1
+    assert isinstance(voice_packets[0], PcmVoicePacket)
+    assert len(voice_packets[0].data) == 256 * 2
+
+
 def test_report_id_alone_cannot_hide_a_normal_key_report() -> None:
     """An F0 report without the descriptor and Opus signature stays visible."""
     manager = object.__new__(BluetoothHidRemoteManager)
