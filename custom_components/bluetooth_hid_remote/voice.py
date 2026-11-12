@@ -25,6 +25,11 @@ MAX_PCM_BYTES: Final = VOICE_SAMPLE_RATE * 2 * 20
 FFMPEG_TIMEOUT: Final = 20.0
 ATVV_CODEC_ADPCM_16K: Final = 0x02
 ATVV_MAX_PACKET_BYTES: Final = 512
+# Android TV Voice 0.4 sends no codec in Audio Start. Its audio is a byte
+# stream of fixed frames: sequence (2, big-endian), remote ID (1), predictor
+# (2, big-endian signed), step index (1), then 128 bytes / 256 ADPCM samples.
+ATVV_V04_HEADER_BYTES: Final = 6
+ATVV_V04_FRAME_BYTES: Final = ATVV_V04_HEADER_BYTES + 128
 
 _IMA_INDEX_TABLE: Final = (
     -1,
@@ -252,6 +257,48 @@ class AtvvImaAdpcmDecoder:
                 self.step_index = min(88, max(0, self.step_index))
                 pack_into("<h", output, offset, self.predictor)
                 offset += 2
+        return bytes(output)
+
+
+@dataclass(slots=True)
+class AtvvV04FrameDecoder:
+    """Reassemble and decode Android TV Voice 0.4 framed 16 kHz IMA ADPCM.
+
+    Notifications are smaller than a frame, so bytes are accumulated and each
+    complete frame is decoded from the predictor and step index in its own
+    header. A lost notification therefore corrupts at most one frame.
+    """
+
+    buffer: bytearray = field(default_factory=bytearray)
+    expected_sequence: int | None = None
+    sequence_gaps: int = 0
+    frames: int = 0
+    _decoder: AtvvImaAdpcmDecoder = field(default_factory=AtvvImaAdpcmDecoder)
+
+    def decode(self, data: bytes | bytearray) -> bytes:
+        """Append one notification and return PCM for every completed frame."""
+        value = bytes(data)
+        if not value or len(value) > ATVV_MAX_PACKET_BYTES:
+            raise VoiceTransportError("invalid ATVV 0.4 packet size")
+        self.buffer += value
+        output = bytearray()
+        while len(self.buffer) >= ATVV_V04_FRAME_BYTES:
+            frame = bytes(self.buffer[:ATVV_V04_FRAME_BYTES])
+            del self.buffer[:ATVV_V04_FRAME_BYTES]
+            sequence = int.from_bytes(frame[0:2], "big")
+            predictor = int.from_bytes(frame[3:5], "big", signed=True)
+            step_index = frame[5]
+            if step_index >= len(_IMA_STEP_TABLE):
+                self.buffer.clear()
+                raise VoiceTransportError("invalid ATVV 0.4 frame header")
+            if self.expected_sequence is not None and sequence != (
+                self.expected_sequence
+            ):
+                self.sequence_gaps += 1
+            self.expected_sequence = (sequence + 1) & 0xFFFF
+            self.frames += 1
+            self._decoder.reset(predictor, step_index)
+            output += self._decoder.decode(frame[ATVV_V04_HEADER_BYTES:])
         return bytes(output)
 
 

@@ -304,6 +304,80 @@ async def test_atvv_command_uses_exact_bluez_write_value_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_atvv_command_uses_write_request_when_tx_requires_it() -> None:
+    """A write-only ATVV TX (Sony VRC 001) receives a write request."""
+
+    class Bus:
+        connected = True
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def call(self, message):
+            self.calls.append(message)
+            return SimpleNamespace(
+                message_type=MessageType.METHOD_RETURN,
+                error_name=None,
+            )
+
+    bus = Bus()
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    manager.connected = True
+    manager._stopping = False
+    manager._atvv_tx_path = "/service0200/char0201"
+    manager._atvv_tx_write_type = "request"
+    manager._bluez_manager = SimpleNamespace(_bus=bus)
+
+    await manager._async_write_atvv(bytes.fromhex("0c01"), "MIC_OPEN")
+
+    assert bus.calls[0].body[1]["type"].value == "request"
+
+
+@pytest.mark.parametrize(
+    ("properties", "write_type"),
+    [
+        (["write-without-response", "write"], "command"),
+        (["write-without-response"], "command"),
+        (["write"], "request"),
+    ],
+)
+def test_atvv_tx_write_type_follows_characteristic_properties(
+    properties: list[str], write_type: str
+) -> None:
+    """Write-without-response is kept where declared, else a write request."""
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    tx = SimpleNamespace(
+        uuid=ATVV_TX_UUID,
+        handle=0x201,
+        properties=properties,
+        obj=("/service0200/char0201", {}),
+    )
+
+    manager._map_atvv_characteristics(SimpleNamespace(characteristics=[tx]))
+
+    assert manager._atvv_tx_path == "/service0200/char0201"
+    assert manager._atvv_tx_write_type == write_type
+
+
+def test_non_writable_atvv_tx_is_not_used() -> None:
+    """A TX without any write property disables ATVV voice commands."""
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    tx = SimpleNamespace(
+        uuid=ATVV_TX_UUID,
+        handle=0x201,
+        properties=["read"],
+        obj=("/service0200/char0201", {}),
+    )
+
+    manager._map_atvv_characteristics(SimpleNamespace(characteristics=[tx]))
+
+    assert manager._atvv_tx_path is None
+
+
+@pytest.mark.asyncio
 async def test_hid_metadata_is_loaded_from_existing_bluez_connection() -> None:
     """Report Map and Reference reads populate the decoder and report ID."""
     report_map_path = "/service004f/char0055"
@@ -764,6 +838,41 @@ def test_atvv_values_never_enter_key_pipeline(
             bytes.fromhex("f5ffe2ffd6ffbdffa5ff7dff35ff9ffe"),
         )
     ]
+
+
+def test_atvv_v04_audio_start_decodes_framed_stream(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A codec-less 0.4 Audio Start (Sony VRC 001) decodes framed audio."""
+    manager = object.__new__(BluetoothHidRemoteManager)
+    manager.address = "00:11:22:33:44:55"
+    control_path = "/service0200/char0206"
+    audio_path = "/service0200/char0203"
+    manager._atvv_paths = {control_path: "control", audio_path: "audio"}
+    manager._atvv_audio_packet_count = 0
+    manager._atvv_decoder = None
+    manager._atvv_frame_bytes = None
+    manager._ignored_value_paths = set()
+    manager._initial_cached_values_by_path = {}
+    manager._report_metadata_by_path = {}
+    manager._listeners = {pytest.fail}
+    voice_packets: list[VoicePacket | None] = []
+    manager._voice_listeners = {voice_packets.append}
+    manager.last_voice_packet = None
+    frame = bytes.fromhex("000100000000") + bytes.fromhex("5a") * 128
+
+    with caplog.at_level("DEBUG"):
+        manager._async_bluez_value_changed(control_path, b"\x04" + bytes(19))
+        for offset in range(0, len(frame), 20):
+            manager._async_bluez_value_changed(audio_path, frame[offset : offset + 20])
+
+    assert "Ignored unsupported ATVV audio codec" not in caplog.text
+    assert "header=000100000000" in caplog.text
+    assert "5a5a" not in caplog.text
+    assert manager._atvv_audio_packet_count == 7
+    assert len(voice_packets) == 1
+    assert isinstance(voice_packets[0], PcmVoicePacket)
+    assert len(voice_packets[0].data) == 256 * 2
 
 
 def test_report_id_alone_cannot_hide_a_normal_key_report() -> None:

@@ -55,6 +55,7 @@ from .voice import (
     VOICE_START_COMMAND,
     VOICE_STOP_COMMAND,
     AtvvImaAdpcmDecoder,
+    AtvvV04FrameDecoder,
     HidVoicePacket,
     PcmVoicePacket,
     VoicePacket,
@@ -173,10 +174,11 @@ class BluetoothHidRemoteManager:
         self._hid_voice_packet_seen = False
         self._atvv_paths: dict[str, str] = {}
         self._atvv_tx_path: str | None = None
+        self._atvv_tx_write_type = "command"
         self._atvv_close_timer: TimerHandle | None = None
         self._atvv_audio_packet_count = 0
         self._atvv_capture_active = False
-        self._atvv_decoder: AtvvImaAdpcmDecoder | None = None
+        self._atvv_decoder: AtvvImaAdpcmDecoder | AtvvV04FrameDecoder | None = None
         self._atvv_frame_bytes: int | None = None
         self._ignored_value_paths: set[str] = set()
         self._initial_cached_values_by_path: dict[str, bytes] = {}
@@ -529,7 +531,24 @@ class BluetoothHidRemoteManager:
                 continue
             discovered.append(f"{kind}@{characteristic.handle}")
             if kind == "tx":
+                # BlueZ sends an explicit "command" even when the
+                # characteristic does not declare write-without-response, and
+                # the remote may silently drop it. Some ATVV remotes (Sony VRC
+                # 001) declare only write, so use the type the TX declares,
+                # preferring write-without-response as on Google's remote.
+                properties = set(characteristic.properties)
+                if "write-without-response" in properties:
+                    self._atvv_tx_write_type = "command"
+                elif "write" in properties:
+                    self._atvv_tx_write_type = "request"
+                else:
+                    _LOGGER.warning(
+                        "Ignored non-writable ATVV TX characteristic on %s",
+                        self.address,
+                    )
+                    continue
                 self._atvv_tx_path = self._gatt_object_path(characteristic)
+                discovered[-1] += f":{self._atvv_tx_write_type}"
                 continue
             if not ({"notify", "indicate"} & set(characteristic.properties)):
                 continue
@@ -845,6 +864,7 @@ class BluetoothHidRemoteManager:
                 "Skipped ATVV %s for disconnected %s", operation, self.address
             )
             return
+        write_type = getattr(self, "_atvv_tx_write_type", "command")
         reply = await bus.call(
             Message(
                 destination=defs.BLUEZ_SERVICE,
@@ -852,12 +872,16 @@ class BluetoothHidRemoteManager:
                 interface=defs.GATT_CHARACTERISTIC_INTERFACE,
                 member="WriteValue",
                 signature="aya{sv}",
-                body=[bytes(value), {"type": Variant("s", "command")}],
+                body=[bytes(value), {"type": Variant("s", write_type)}],
             )
         )
         assert_gatt_reply(reply)
         _LOGGER.debug(
-            "Sent ATVV %s address=%s bytes=%d", operation, self.address, len(value)
+            "Sent ATVV %s address=%s bytes=%d type=%s",
+            operation,
+            self.address,
+            len(value),
+            write_type,
         )
 
     async def _async_start_atvv_capture(self) -> None:
@@ -901,10 +925,14 @@ class BluetoothHidRemoteManager:
             )
         finally:
             self._atvv_capture_active = False
+            decoder = self._atvv_decoder
             _LOGGER.debug(
-                "ATVV capture address=%s audio_packets=%d",
+                "ATVV capture address=%s audio_packets=%d%s",
                 self.address,
                 self._atvv_audio_packet_count,
+                f" v04_frames={decoder.frames} sequence_gaps={decoder.sequence_gaps}"
+                if isinstance(decoder, AtvvV04FrameDecoder)
+                else "",
             )
 
     @callback
@@ -1072,9 +1100,14 @@ class BluetoothHidRemoteManager:
                     )
                 elif raw_opcode == 0x04 and len(value) >= 4:
                     codec = value[2]
-                    self._atvv_decoder = (
-                        AtvvImaAdpcmDecoder() if codec == ATVV_CODEC_ADPCM_16K else None
-                    )
+                    if codec == ATVV_CODEC_ADPCM_16K:
+                        self._atvv_decoder = AtvvImaAdpcmDecoder()
+                    elif codec == 0x00:
+                        # ATVV 0.4 Audio Start carries no codec; its padding
+                        # reads as 0x00. It streams framed 16 kHz ADPCM.
+                        self._atvv_decoder = AtvvV04FrameDecoder()
+                    else:
+                        self._atvv_decoder = None
                     _LOGGER.debug(
                         "ATVV audio start address=%s reason=0x%02x codec=0x%02x "
                         "stream_id=%d",
@@ -1089,6 +1122,11 @@ class BluetoothHidRemoteManager:
                             codec,
                             self.address,
                         )
+                elif raw_opcode == 0x0A and isinstance(
+                    getattr(self, "_atvv_decoder", None), AtvvV04FrameDecoder
+                ):
+                    # 0.4 frames carry their own decoder state in each header.
+                    _LOGGER.debug("ATVV 0.4 audio sync address=%s", self.address)
                 elif raw_opcode == 0x0A and len(value) >= 7:
                     codec = value[1]
                     if codec == ATVV_CODEC_ADPCM_16K:
@@ -1141,6 +1179,23 @@ class BluetoothHidRemoteManager:
                     )
                     self._publish_voice_packet(None)
                     return
+                if isinstance(decoder, AtvvV04FrameDecoder):
+                    if self._atvv_audio_packet_count <= 8:
+                        # Packet sizes and the first frame header are protocol
+                        # framing, not speech; they show whether the layout is
+                        # right. Later packets begin mid-frame, so their bytes
+                        # are audio and are never logged.
+                        _LOGGER.debug(
+                            "ATVV 0.4 audio address=%s packet=%d bytes=%d%s",
+                            self.address,
+                            self._atvv_audio_packet_count,
+                            len(value),
+                            f" header={value[:6].hex()}"
+                            if self._atvv_audio_packet_count == 1
+                            else "",
+                        )
+                    if not pcm:
+                        return
                 self._publish_voice_packet(PcmVoicePacket(16_000, pcm))
                 if self._atvv_audio_packet_count == 1:
                     _LOGGER.debug(

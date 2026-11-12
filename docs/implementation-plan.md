@@ -166,6 +166,30 @@ unchanged unless the user explicitly removes it.
 - On HAOS, a fresh config-flow pairing of one VRC 001 was offered the repair,
   installed the cache, passed wake verification, and created a working entry
   that delivers key events.
+- Its ATVV TX characteristic (`ab5e0002`) declares only write (`0x08`), not
+  write-without-response. BlueZ does not reject an explicit `command` write on
+  such a characteristic; it sends a write command and reports success, so a
+  remote may drop it silently. ATVV commands therefore use the write type the
+  TX characteristic declares, preferring write-without-response as on Google's
+  reference remote. With write requests, the VRC 001 answered host MIC_CLOSE
+  with Audio Stop; whether it also acts on write commands was not tested.
+- A HAOS debug log showed why voice still failed. The remote sends ATVV
+  Search (`0x08`) and Audio Start (`0x04`) about 20 ms apart, before the host
+  MIC_OPEN, so it streams on its own. Its control messages are 20 bytes and
+  Audio Start carries no codec (the padding reads as `0x00`), matching ATVV
+  0.4 rather than 1.0. A five-second capture delivered 2184 notifications,
+  consistent with 312 frames of 134 bytes split into seven notifications each:
+  62.2 frames/s, against 62.5 for 256 samples per frame at 16 kHz.
+- ATVV 0.4 audio is reassembled as a byte stream of 134-byte frames, each with
+  a 6-byte header (sequence, remote ID, predictor, step index) and 128 bytes
+  of IMA ADPCM. Every frame resets the decoder from its own header, so a lost
+  notification corrupts at most one frame. The layout was first inferred from
+  the packet rate and the published 0.4 format; audio decoded this way then
+  worked with Assist on HAOS.
+- Because this remote streams before the HID Search release, an ATVV PCM
+  recording ignores the release and ends on Audio Stop or the timeout. An
+  empty buffer opened by the Search press adopts the transport of the first
+  voice packet instead of rejecting it as mixed.
 
 ## Hardware-spike evidence
 
